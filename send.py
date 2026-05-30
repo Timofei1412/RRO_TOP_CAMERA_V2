@@ -1,24 +1,17 @@
-"""
-send.py — Отправка команд на ESP32 через Bluetooth.
-Формат: [w|b][команды]\n
-"""
 import sys
 import time
 from typing import List, Optional
 
-# Проверка правильного пакета serial (pyserial)
 try:
     import serial
     import serial.tools.list_ports
-    if not hasattr(serial, 'Serial'):
-        raise ImportError("Wrong package")
+    if not hasattr(serial, "Serial"):
+        raise ImportError("Invalid serial package")
 except ImportError:
     print("=" * 60)
-    print("ОШИБКА ОКРУЖЕНИЯ: Установлен неверный пакет 'serial'!")
-    print("Для работы с COM-портом нужен пакет 'pyserial'.")
-    print("Выполните в терминале (в вашем .venv):")
-    print("   pip uninstall serial -y")
-    print("   pip install pyserial")
+    print("ERROR: Wrong 'serial' package installed.")
+    print("Required: pyserial")
+    print("Run: pip uninstall serial -y && pip install pyserial")
     print("=" * 60)
     sys.exit(1)
 
@@ -27,88 +20,83 @@ class BluetoothSender:
     def __init__(self, baudrate: int = 115200, timeout: int = 10):
         self.baudrate = baudrate
         self.timeout = timeout
-        self.serial_conn = None
+        self.conn = None
         self.connected = False
         self.port = None
 
-    def find_all_ports(self) -> List[str]:
+    def list_ports(self) -> List[str]:
         ports = serial.tools.list_ports.comports()
-        for port in ports:
-            print(f"Порт: {port.device} - {port.description}")
+        for p in ports:
+            print(f"Port: {p.device} - {p.description}")
         return [p.device for p in ports]
 
     def connect(self, port: str) -> bool:
         try:
-            print(f"   Подключение к {port}...   ", end="")
-            self.serial_conn = serial.Serial(port, self.baudrate, timeout=self.timeout)
-            time.sleep(3) 
-            if self.serial_conn.is_open:
-                self.connected = True 
+            print(f"Connecting to {port}...", end=" ")
+            self.conn = serial.Serial(port, self.baudrate, timeout=self.timeout)
+            time.sleep(3)
+            if self.conn.is_open:
+                self.connected = True
                 self.port = port
-                print("Успех!")
+                print("OK")
                 return True
-            self.serial_conn.close()
+            self.conn.close()
             return False
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"Error: {e}")
             return False
 
     def connect_any(self) -> bool:
-        ports = self.find_all_ports()
-        for port in ports:
+        for port in self.list_ports():
             if self.connect(port):
                 return True
         return False
 
-    def connect_specific(self, port: str) -> bool:
+    def connect_to(self, port: Optional[str] = None) -> bool:
         return self.connect(port) if port else self.connect_any()
 
     def disconnect(self):
-        if self.serial_conn and self.serial_conn.is_open:
-            time.sleep(1)  
-            self.serial_conn.flush()
-            self.serial_conn.close()
+        if self.conn and self.conn.is_open:
+            time.sleep(1)
+            self.conn.flush()
+            self.conn.close()
         self.connected = False
 
     @staticmethod
-    def commands_to_compact(commands: List[str], start_level: int = 0) -> str:
-        level_char = 'w' if start_level == 0 else 'b'
-        parts = [level_char]
+    def to_compact(commands: List[str], start_level: int = 0) -> str:
+        prefix = "w" if start_level == 0 else "b"
+        result = [prefix]
         for cmd in commands:
-            cmd = cmd.strip().upper()
-            if cmd.startswith('F'):
-                parts.append(cmd)
-            elif cmd == 'AROUND':
-                parts.append('A')
-            elif cmd in ('R', 'L', 'U', 'D', 'T', 'P'):
-                parts.append(cmd)
-        return ''.join(parts)
+            c = cmd.strip().upper()
+            if c.startswith("F"):
+                result.append(c)
+            elif c == "AROUND":
+                result.append("A")
+            elif c in ("R", "L", "U", "D", "T", "P"):
+                result.append(c)
+        return "".join(result)
 
     def send_compact(self, commands: List[str], start_level: int = 0) -> bool:
         if not self.connected:
             return False
         try:
-            compact = self.commands_to_compact(commands, start_level)
-            msg = f"{compact}\n"
-            
+            msg = self.to_compact(commands, start_level) + "\n"
             time.sleep(0.5)
-            self.serial_conn.write(msg.encode('utf-8'))
-            self.serial_conn.flush()
-            print(f"Отправлено: {compact}")
-            
+            self.conn.write(msg.encode("utf-8"))
+            self.conn.flush()
+            print(f"Sent: {msg.strip()}")
             time.sleep(1.0)
             return True
         except Exception as e:
-            print(f"Ошибка отправки: {e}")
+            print(f"Send error: {e}")
             return False
 
     def read_response(self, timeout: int = 60) -> List[str]:
-        """Читает ответы от ESP32 до DONE/ERR или таймаута."""
         responses = []
         start = time.time()
         while time.time() - start < timeout:
-            if self.serial_conn and self.serial_conn.in_waiting > 0:
-                line = self.serial_conn.readline().decode('utf-8').strip()
+            if self.conn and self.conn.in_waiting > 0:
+                line = self.conn.readline().decode("utf-8").strip()
                 if line:
                     responses.append(line)
                     print(f"ESP32: {line}")
@@ -118,16 +106,15 @@ class BluetoothSender:
         return responses
 
 
-def run(commands: List[str] = None, com_port: str = None,
+def run(commands: Optional[List[str]] = None, com_port: Optional[str] = None,
         start_level: int = 0, simulate: bool = False) -> bool:
     if simulate or not com_port:
-        compact = BluetoothSender.commands_to_compact(commands or [], start_level)
-        print(f"Симуляция: {compact}")
+        print(f"Simulation: {BluetoothSender.to_compact(commands or [], start_level)}")
         return True
-        
+
     sender = BluetoothSender()
-    if not sender.connect_specific(com_port):
-        print("Не удалось подключиться. Переход в режим симуляции.")
+    if not sender.connect_to(com_port):
+        print("Connection failed. Falling back to simulation.")
         return run(commands, None, start_level, simulate=True)
 
     if commands:
@@ -135,10 +122,10 @@ def run(commands: List[str] = None, com_port: str = None,
         sender.read_response(timeout=60)
 
     sender.disconnect()
-    print("Готово")
+    print("Done")
     return True
 
 
 if __name__ == "__main__":
-    test_cmds = ["F3", "R", "F2", "T", "L", "P"]
-    print(f"Тест: {BluetoothSender.commands_to_compact(test_cmds, 0)}")
+    test = ["F3", "R", "F2", "T", "L", "P"]
+    print(f"Test: {BluetoothSender.to_compact(test, 0)}")

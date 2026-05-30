@@ -6,9 +6,6 @@ import os
 import json
 from typing import Optional, Tuple, List, Dict, Any
 
-# ============================================================
-# КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
-# ============================================================
 DEFAULT_CONFIG = {
     'hough': {
         'threshold': 19,
@@ -36,17 +33,13 @@ DEFAULT_CONFIG = {
     }
 }
 
-# ============================================================
-# СОХРАНЕНИЕ / ЗАГРУЗКА ПОСЛЕДНЕГО КВАДА
-# ============================================================
-LAST_QUAD_FILE = "last_quad.json"
+LAST_QUAD_PATH = "last_quad.json"
 
 
 def load_last_quad() -> Optional[np.ndarray]:
-    """Загружает последние сохранённые координаты углов."""
-    if os.path.exists(LAST_QUAD_FILE):
+    if os.path.exists(LAST_QUAD_PATH):
         try:
-            with open(LAST_QUAD_FILE, 'r', encoding='utf-8') as f:
+            with open(LAST_QUAD_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 quad = np.array(data['quad'], dtype=np.float32)
                 if quad.shape == (4, 2):
@@ -57,30 +50,26 @@ def load_last_quad() -> Optional[np.ndarray]:
 
 
 def save_last_quad(quad: np.ndarray):
-    """Сохраняет координаты углов как базовые для следующих запусков."""
     try:
         data = {'quad': quad.tolist()}
-        with open(LAST_QUAD_FILE, 'w', encoding='utf-8') as f:
+        with open(LAST_QUAD_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"⚠️ Не удалось сохранить координаты: {e}")
+        print(f"Warning: Не удалось сохранить координаты: {e}")
 
 
-# ============================================================
-# Глобальное состояние для GUI
-# ============================================================
-class DebugState:
+class State:
     def __init__(self):
         self.frame = None
         self.mask = None
-        self.config = self._deep_copy_config(DEFAULT_CONFIG)
+        self.config = self._copy_config(DEFAULT_CONFIG)
         self.windows_created = False
         self.user_points = []
         self.refined_quad = None
         self.auto_quad = None
-        self.saved_quad = None  # из last_quad.json
+        self.saved_quad = None
 
-    def _deep_copy_config(self, config: dict) -> dict:
+    def _copy_config(self, config: dict) -> dict:
         return {
             'hough': config['hough'].copy(),
             'hsv': config['hsv'].copy(),
@@ -111,40 +100,17 @@ class DebugState:
         print("ТЕКУЩИЕ ПАРАМЕТРЫ (скопируйте и вставьте в DEFAULT_CONFIG):")
         print("=" * 70)
         print("DEFAULT_CONFIG = {")
-        print("    'hough': {")
-        print(f"        'threshold': {self.config['hough']['threshold']},")
-        print(f"        'minLineLength': {self.config['hough']['minLineLength']},")
-        print(f"        'maxLineGap': {self.config['hough']['maxLineGap']}")
-        print("    },")
-        print("    'hsv': {")
-        print(f"        'sat_min': {self.config['hsv']['sat_min']},")
-        print(f"        'val_min': {self.config['hsv']['val_min']}")
-        print("    },")
-        print("    'morph': {")
-        print(f"        'close_iter': {self.config['morph']['close_iter']},")
-        print(f"        'open_iter': {self.config['morph']['open_iter']},")
-        print(f"        'erode_iter': {self.config['morph']['erode_iter']},")
-        print(f"        'dilate_iter': {self.config['morph']['dilate_iter']}")
-        print("    },")
-        print("    'filter': {")
-        print(f"        'min_len_ratio': {self.config['filter']['min_len_ratio']}")
-        print("    },")
-        print("    'ransac': {")
-        print(f"        'iterations': {self.config['ransac']['iterations']},")
-        print(f"        'inlier_threshold': {self.config['ransac']['inlier_threshold']},")
-        print(f"        'min_inlier_ratio': {self.config['ransac']['min_inlier_ratio']},")
-        print(f"        'min_points_per_edge': {self.config['ransac']['min_points_per_edge']}")
-        print("    }")
+        for section, params in self.config.items():
+            print(f"    '{section}': {{")
+            for key, val in params.items():
+                print(f"        '{key}': {val},")
+            print("    },")
         print("}")
         print("=" * 70)
 
 
-debug_state = DebugState()
+state = State()
 
-
-# ============================================================
-# 1. Получение кадра
-# ============================================================
 
 def grab_frame(source: str) -> np.ndarray:
     if source.lower().startswith("rtsp://") or source.lower().startswith("rtmp://"):
@@ -165,55 +131,48 @@ def grab_frame(source: str) -> np.ndarray:
         return frame
 
 
-# ============================================================
-# 2. Маска красных областей
-# ============================================================
 def get_red_mask(bgr: np.ndarray, config: Optional[dict] = None) -> np.ndarray:
     if config is None:
-        config = debug_state.config
+        config = state.config
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     sat_min = config['hsv']['sat_min']
     val_min = config['hsv']['val_min']
+
     lower1 = np.array([0, sat_min, val_min])
     upper1 = np.array([10, 255, 255])
     lower2 = np.array([170, sat_min, val_min])
     upper2 = np.array([180, 255, 255])
+
     mask1 = cv2.inRange(hsv, lower1, upper1)
     mask2 = cv2.inRange(hsv, lower2, upper2)
     mask = cv2.bitwise_or(mask1, mask2)
+
     kern = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    close_iter = config['morph']['close_iter']
-    open_iter = config['morph']['open_iter']
-    erode_iter = config['morph']['erode_iter']
-    dilate_iter = config['morph']['dilate_iter']
-    if close_iter > 0:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern, iterations=close_iter)
-    if open_iter > 0:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern, iterations=open_iter)
-    if erode_iter > 0:
-        mask = cv2.erode(mask, kern, iterations=erode_iter)
-    if dilate_iter > 0:
-        mask = cv2.dilate(mask, kern, iterations=dilate_iter)
+    if config['morph']['close_iter'] > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern, iterations=config['morph']['close_iter'])
+    if config['morph']['open_iter'] > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern, iterations=config['morph']['open_iter'])
+    if config['morph']['erode_iter'] > 0:
+        mask = cv2.erode(mask, kern, iterations=config['morph']['erode_iter'])
+    if config['morph']['dilate_iter'] > 0:
+        mask = cv2.dilate(mask, kern, iterations=config['morph']['dilate_iter'])
+
     return mask
 
 
-# ============================================================
-# 3. RANSAC line fitting
-# ============================================================
 def ransac_fit_line(points: np.ndarray,
                     iterations: int = 300,
                     inlier_threshold: float = 8.0,
                     min_inlier_ratio: float = 0.25
-                    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+                    ) -> Optional[Tuple[np.ndarray, np.ndarray, Tuple]]:
     if points is None or len(points) < 2:
         return None
     n = len(points)
     min_inliers = max(2, int(n * min_inlier_ratio))
 
-    best_inliers = None
     best_count = 0
+    best_inliers = None
     best_line = None
-    best_pair = None
 
     rng = np.random.default_rng(42)
 
@@ -229,6 +188,8 @@ def ransac_fit_line(points: np.ndarray,
         b = p2[0] - p1[0]
         c = p1[0] * p2[1] - p2[0] * p1[1]
         norm = np.hypot(a, b)
+        if norm == 0:
+            continue
         a, b, c = a / norm, b / norm, c / norm
 
         distances = np.abs(points[:, 0] * a + points[:, 1] * b + c)
@@ -239,9 +200,8 @@ def ransac_fit_line(points: np.ndarray,
             best_count = count
             best_inliers = inliers
             best_line = np.array([a, b, c])
-            best_pair = (p1, p2)
 
-    if best_count < min_inliers:
+    if best_count < min_inliers or best_inliers is None:
         return None
 
     inlier_points = points[best_inliers]
@@ -276,32 +236,24 @@ def line_from_coeffs(coeffs: np.ndarray) -> Tuple[float, float, float, float]:
     return float(vx), float(vy), float(x0), float(y0)
 
 
-def classify_points_to_edges(points: np.ndarray, H: int, W: int
-                             ) -> Dict[str, np.ndarray]:
+def classify_points_to_edges(points: np.ndarray, H: int, W: int) -> Dict[str, np.ndarray]:
     if len(points) == 0:
         return {'top': np.array([]), 'right': np.array([]),
                 'bottom': np.array([]), 'left': np.array([])}
     pts = points.astype(np.float64)
     x, y = pts[:, 0], pts[:, 1]
-
     d1 = y * W - x * H
     d2 = y * W + x * H - W * H
 
-    top_mask = (d1 < 0) & (d2 < 0)
-    bottom_mask = (d1 > 0) & (d2 > 0)
-    left_mask = (d1 < 0) & (d2 > 0)
-    right_mask = (d1 > 0) & (d2 < 0)
-
     return {
-        'top': pts[top_mask],
-        'bottom': pts[bottom_mask],
-        'left': pts[left_mask],
-        'right': pts[right_mask],
+        'top': pts[(d1 < 0) & (d2 < 0)],
+        'bottom': pts[(d1 > 0) & (d2 > 0)],
+        'left': pts[(d1 < 0) & (d2 > 0)],
+        'right': pts[(d1 > 0) & (d2 < 0)],
     }
 
 
-def intersect_lines(coeffs1: np.ndarray, coeffs2: np.ndarray
-                    ) -> Optional[Tuple[float, float]]:
+def intersect_lines(coeffs1: np.ndarray, coeffs2: np.ndarray) -> Optional[Tuple[float, float]]:
     a1, b1, c1 = coeffs1
     a2, b2, c2 = coeffs2
     det = a1 * b2 - a2 * b1
@@ -309,18 +261,14 @@ def intersect_lines(coeffs1: np.ndarray, coeffs2: np.ndarray
         return None
     x = (b1 * c2 - b2 * c1) / det
     y = (a2 * c1 - a1 * c2) / det
-    return (float(x), float(y))
+    return float(x), float(y)
 
 
-# ============================================================
-# 4. НОВЫЙ УСТОЙЧИВЫЙ АЛГОРИТМ ПОИСКА КВАДА
-# ============================================================
-def find_field_quad_robust(mask: np.ndarray,
-                           config: Optional[dict] = None,
-                           debug_img: Optional[np.ndarray] = None
-                           ) -> Optional[np.ndarray]:
+def find_quad_ransac(mask: np.ndarray,
+                     config: Optional[dict] = None,
+                     debug_img: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
     if config is None:
-        config = debug_state.config
+        config = state.config
     H, W = mask.shape[:2]
     ransac_cfg = config.get('ransac', DEFAULT_CONFIG['ransac'])
 
@@ -422,15 +370,12 @@ def find_field_quad_robust(mask: np.ndarray,
     return quad
 
 
-# ============================================================
-# 5. СТАРЫЕ АЛГОРИТМЫ (как fallback)
-# ============================================================
-def find_field_quad(mask: np.ndarray,
-                    min_area_ratio: float = 0.02,
-                    debug_img: Optional[np.ndarray] = None,
-                    config: Optional[dict] = None) -> Optional[np.ndarray]:
+def find_quad_classic(mask: np.ndarray,
+                      min_area_ratio: float = 0.02,
+                      debug_img: Optional[np.ndarray] = None,
+                      config: Optional[dict] = None) -> Optional[np.ndarray]:
     if config is None:
-        config = debug_state.config
+        config = state.config
     H, W = mask.shape[:2]
     lines = cv2.HoughLinesP(mask, rho=1, theta=np.pi / 180,
                             threshold=config['hough']['threshold'],
@@ -439,11 +384,13 @@ def find_field_quad(mask: np.ndarray,
     quad_hough = None
     if lines is not None and len(lines) >= 4:
         quad_hough = find_quad_by_hough_enhanced(lines, H, W, debug_img, config['filter'])
+
     quad_hull = find_quad_by_convex_hull(mask, min_area_ratio)
     best_quad = select_best_quad(quad_hough, quad_hull, mask.shape, mask)
+
     if best_quad is None:
         if quad_hough is None and quad_hull is None:
-            print("⚠️  Оба алгоритма не нашли квад, fallback на minAreaRect...")
+            print("Warning: Оба алгоритма не нашли квад, fallback на minAreaRect...")
             return find_quad_by_min_area_rect(mask, min_area_ratio)
     return best_quad
 
@@ -452,17 +399,19 @@ def find_quad_by_hough_enhanced(lines: np.ndarray, H: int, W: int,
                                 debug_img: Optional[np.ndarray] = None,
                                 filter_params: Optional[dict] = None) -> Optional[np.ndarray]:
     if filter_params is None:
-        filter_params = debug_state.config['filter']
+        filter_params = state.config['filter']
     segments = []
     for l in lines:
         x1, y1, x2, y2 = l[0]
         length = float(np.hypot(x2 - x1, y2 - y1))
         angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180)
         segments.append((float(x1), float(y1), float(x2), float(y2), length, angle))
+
     min_len = max(H, W) * filter_params['min_len_ratio']
     segments = [s for s in segments if s[4] >= min_len]
     if len(segments) < 4:
         return None
+
     horizontals, verticals = [], []
     for s in segments:
         ang = s[5]
@@ -470,14 +419,18 @@ def find_quad_by_hough_enhanced(lines: np.ndarray, H: int, W: int,
             horizontals.append(s)
         else:
             verticals.append(s)
+
     if len(horizontals) < 2 or len(verticals) < 2:
         return None
+
     h_lines = filter_external_lines(horizontals, H, W, is_horizontal=True,
                                     debug_img=debug_img, color=(255, 0, 0))
     v_lines = filter_external_lines(verticals, H, W, is_horizontal=False,
                                     debug_img=debug_img, color=(0, 0, 255))
+
     if h_lines is None or v_lines is None or len(h_lines) != 2 or len(v_lines) != 2:
         return None
+
     corners = []
     for hl in h_lines:
         for vl in v_lines:
@@ -485,6 +438,7 @@ def find_quad_by_hough_enhanced(lines: np.ndarray, H: int, W: int,
             if pt is None:
                 return None
             corners.append(pt)
+
     if len(corners) != 4:
         return None
     quad = order_points(np.array(corners, dtype=np.float32))
@@ -497,6 +451,7 @@ def filter_external_lines(segments: list, H: int, W: int,
                           color: Tuple[int, int, int] = (255, 0, 0)) -> Optional[list]:
     if not segments or len(segments) < 2:
         return None
+
     if is_horizontal:
         sorted_segs = sorted(segments, key=lambda s: (s[1] + s[3]) / 2.0)
         mid_y = H / 2.0
@@ -517,6 +472,7 @@ def filter_external_lines(segments: list, H: int, W: int,
         left_line = min(left_group, key=lambda s: (s[0] + s[2]) / 2.0)
         right_line = max(right_group, key=lambda s: (s[0] + s[2]) / 2.0)
         result_segments = [left_line, right_line]
+
     lines = []
     for seg in result_segments:
         line = fit_line_to_segments([seg])
@@ -542,15 +498,17 @@ def fit_line_to_segments(segments: list) -> Tuple[float, float, float, float]:
         for _ in range(weight):
             points.append([[x1, y1]])
             points.append([[x2, y2]])
+
     if len(points) < 2:
         x1, y1, x2, y2, length, angle = segments[0]
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         dx, dy = (x2 - x1), (y2 - y1)
         n = float(np.hypot(dx, dy)) or 1.0
-        return (dx / n, dy / n, cx, cy)
+        return dx / n, dy / n, cx, cy
+
     pts_arr = np.array(points, dtype=np.float32)
     line = cv2.fitLine(pts_arr, cv2.DIST_L2, 0, 0.01, 0.01)
-    return (float(line[0][0]), float(line[1][0]), float(line[2][0]), float(line[3][0]))
+    return float(line[0][0]), float(line[1][0]), float(line[2][0]), float(line[3][0])
 
 
 def line_intersection(line1, line2) -> Optional[Tuple[float, float]]:
@@ -560,7 +518,7 @@ def line_intersection(line1, line2) -> Optional[Tuple[float, float]]:
     if abs(det) < 1e-6:
         return None
     t = ((x2 - x1) * vy2 - (y2 - y1) * vx2) / det
-    return (float(x1 + t * vx1), float(y1 + t * vy1))
+    return float(x1 + t * vx1), float(y1 + t * vy1)
 
 
 def find_quad_by_min_area_rect(mask: np.ndarray,
@@ -596,6 +554,7 @@ def find_quad_by_convex_hull(mask: np.ndarray,
             epsilon /= 1.15
         approx = cv2.approxPolyDP(hull, epsilon, True)
         iterations += 1
+
     if len(approx) == 4:
         return order_points(approx.reshape(4, 2).astype(np.float32))
     return find_quad_by_extreme_points(points)
@@ -634,12 +593,12 @@ def validate_quad(quad: Optional[np.ndarray], img_shape: Tuple[int, ...],
         if pt[0] < -W * 0.1 or pt[0] > W * 1.1 or pt[1] < -H * 0.1 or pt[1] > H * 1.1:
             return False
 
-    def cross_product(p1, p2, p3):
-        return (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
-
     signs = []
     for i in range(4):
-        signs.append(cross_product(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]))
+        val = (quad[(i + 1) % 4][0] - quad[i][0]) * (quad[(i + 2) % 4][1] - quad[i][1]) - \
+              (quad[(i + 1) % 4][1] - quad[i][1]) * (quad[(i + 2) % 4][0] - quad[i][0])
+        signs.append(val)
+
     if not all(s > 0 for s in signs) and not all(s < 0 for s in signs):
         return False
     return True
@@ -704,17 +663,16 @@ def warp_field(image: np.ndarray, quad: np.ndarray,
     return cv2.warpPerspective(image, M, (out_w, out_h),
                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
+
 def crop_1_percent(img: np.ndarray, target_size: Optional[Tuple[int, int]] = None) -> np.ndarray:
     h, w = img.shape[:2]
     dy, dx = int(h * 0.01), int(w * 0.01)
-    cropped = img[dy:h-dy, dx:w-dx]
+    cropped = img[dy:h - dy, dx:w - dx]
     if target_size is not None:
         cropped = cv2.resize(cropped, target_size, interpolation=cv2.INTER_LINEAR)
     return cropped
 
-# ============================================================
-# РУЧНОЙ ВВОД УГЛОВ
-# ============================================================
+
 INSTRUCTIONS_HEIGHT = 80
 
 
@@ -724,6 +682,7 @@ def manual_quad_input(frame: np.ndarray,
     scale_w = max_display_size[0] / w
     scale_h = max_display_size[1] / h
     scale = min(scale_w, scale_h, 1.0)
+
     if scale < 1.0:
         new_w, new_h = int(w * scale), int(h * scale)
         display_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
@@ -731,6 +690,7 @@ def manual_quad_input(frame: np.ndarray,
         display_frame = frame.copy()
         new_w, new_h = w, h
         scale = 1.0
+
     points_display, points_original = [], []
     window_name = "Manual Corner Selection - Click 4 corners (TL, TR, BR, BL)"
     instructions = np.zeros((INSTRUCTIONS_HEIGHT, new_w, 3), dtype=np.uint8)
@@ -740,6 +700,7 @@ def manual_quad_input(frame: np.ndarray,
     cv2.putText(instructions,
                 f"Image scaled to {new_w}x{new_h} (original {w}x{h}).",
                 (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
     display = np.vstack([instructions, display_frame])
     cv2.imshow(window_name, display)
 
@@ -774,31 +735,27 @@ def manual_quad_input(frame: np.ndarray,
     return order_points(np.array(points_original, dtype=np.float32))
 
 
-# ============================================================
-# ОСНОВНАЯ ФУНКЦИЯ — с каскадом из 3 алгоритмов
-# ============================================================
 def extract_field(source: str,
                   debug: bool = False,
                   out_size: Tuple[int, int] = (1000, 1000),
                   hands: bool = False) -> Optional[np.ndarray]:
     frame = grab_frame(source)
-    mask = get_red_mask(frame, debug_state.config)
+    mask = get_red_mask(frame, state.config)
     quad = None
     method_used = None
     dbg_ransac = None
     dbg_lines = None
 
-    # --- Этап 1: RANSAC ---
+    # Этап 1: RANSAC
     if debug:
         dbg_ransac = frame.copy()
-    quad = find_field_quad_robust(mask, config=debug_state.config, debug_img=dbg_ransac)
+    quad = find_quad_ransac(mask, config=state.config, debug_img=dbg_ransac)
     if quad is not None:
         method_used = "RANSAC (robust)"
     else:
         if debug:
             dbg_lines = frame.copy()
-
-        quad = find_field_quad(mask, debug_img=dbg_lines, config=debug_state.config)
+        quad = find_quad_classic(mask, debug_img=dbg_lines, config=state.config)
         if quad is not None:
             method_used = "Hough+ConvexHull (classic)"
 
@@ -818,18 +775,18 @@ def extract_field(source: str,
                 return None
         else:
             print("\nАвтоматические методы не сработали.")
-            print(f"Попытка загрузить последние сохранённые координаты из {LAST_QUAD_FILE}...")
+            print(f"Попытка загрузить последние сохранённые координаты из {LAST_QUAD_PATH}...")
             quad = load_last_quad()
             if quad is not None:
                 method_used = "LAST_SAVED"
                 print("Использован сохранённый квад из предыдущего запуска.")
             else:
-                print(f"⚠️ Файл {LAST_QUAD_FILE} не найден или невалиден.")
+                print(f"Warning: Файл {LAST_QUAD_PATH} не найден или невалиден.")
                 if debug:
                     cv2.destroyAllWindows()
                 return None
 
-    # --- Debug визуализация ---
+    # Debug визуализация
     if debug:
         show_debug("1. Original Frame", frame)
         show_debug("2. Red Mask", mask)
@@ -854,7 +811,7 @@ def extract_field(source: str,
         print(f"Странное соотношение сторон: {quad.tolist()}")
 
     field = warp_field(frame, quad, out_size[0], out_size[1])
-    field = crop_1_percent(field, out_size)  
+    field = crop_1_percent(field, out_size)
 
     if debug:
         show_debug("4. Field (Warped)", field)
@@ -873,11 +830,8 @@ def show_debug(name: str, img: np.ndarray, max_dim: int = 1000):
     cv2.imshow(name, img)
 
 
-# ============================================================
-# ИНТЕРАКТИВНЫЙ РЕЖИМ (GUI С ТРЕКБАРАМИ)
-# ============================================================
 def on_trackbar_change(*args):
-    debug_state.update_config_from_trackbar()
+    state.update_config_from_trackbar()
     update_debug_windows()
 
 
@@ -885,31 +839,31 @@ def create_debug_gui(H: int, W: int):
     cv2.namedWindow("Debug Controls", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Debug Controls", 900, 700)
     cv2.createTrackbar("Hough Thresh", "Debug Controls",
-                       debug_state.config['hough']['threshold'], 200, on_trackbar_change)
+                       state.config['hough']['threshold'], 200, on_trackbar_change)
     cv2.createTrackbar("Min Line Len", "Debug Controls",
-                       debug_state.config['hough']['minLineLength'], 500, on_trackbar_change)
+                       state.config['hough']['minLineLength'], 500, on_trackbar_change)
     cv2.createTrackbar("Max Line Gap", "Debug Controls",
-                       debug_state.config['hough']['maxLineGap'], 500, on_trackbar_change)
+                       state.config['hough']['maxLineGap'], 500, on_trackbar_change)
     cv2.createTrackbar("Sat Min", "Debug Controls",
-                       debug_state.config['hsv']['sat_min'], 255, on_trackbar_change)
+                       state.config['hsv']['sat_min'], 255, on_trackbar_change)
     cv2.createTrackbar("Val Min", "Debug Controls",
-                       debug_state.config['hsv']['val_min'], 255, on_trackbar_change)
+                       state.config['hsv']['val_min'], 255, on_trackbar_change)
     cv2.createTrackbar("Close Iter", "Debug Controls",
-                       debug_state.config['morph']['close_iter'], 10, on_trackbar_change)
+                       state.config['morph']['close_iter'], 10, on_trackbar_change)
     cv2.createTrackbar("Open Iter", "Debug Controls",
-                       debug_state.config['morph']['open_iter'], 10, on_trackbar_change)
+                       state.config['morph']['open_iter'], 10, on_trackbar_change)
     cv2.createTrackbar("Erode Iter", "Debug Controls",
-                       debug_state.config['morph']['erode_iter'], 10, on_trackbar_change)
+                       state.config['morph']['erode_iter'], 10, on_trackbar_change)
     cv2.createTrackbar("Dilate Iter", "Debug Controls",
-                       debug_state.config['morph']['dilate_iter'], 10, on_trackbar_change)
+                       state.config['morph']['dilate_iter'], 10, on_trackbar_change)
     cv2.createTrackbar("Min Len %", "Debug Controls",
-                       int(debug_state.config['filter']['min_len_ratio'] * 100), 50, on_trackbar_change)
+                       int(state.config['filter']['min_len_ratio'] * 100), 50, on_trackbar_change)
     cv2.createTrackbar("RANSAC Iter", "Debug Controls",
-                       debug_state.config['ransac']['iterations'], 1000, on_trackbar_change)
+                       state.config['ransac']['iterations'], 1000, on_trackbar_change)
     cv2.createTrackbar("RANSAC Thresh", "Debug Controls",
-                       int(debug_state.config['ransac']['inlier_threshold']), 30, on_trackbar_change)
+                       int(state.config['ransac']['inlier_threshold']), 30, on_trackbar_change)
     cv2.createTrackbar("Min Inlier %", "Debug Controls",
-                       int(debug_state.config['ransac']['min_inlier_ratio'] * 100), 80, on_trackbar_change)
+                       int(state.config['ransac']['min_inlier_ratio'] * 100), 80, on_trackbar_change)
 
     control_img = np.zeros((400, 900, 3), dtype=np.uint8)
     cv2.putText(control_img, "Debug Controls", (50, 50),
@@ -920,37 +874,34 @@ def create_debug_gui(H: int, W: int):
                 (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 100), 2)
     cv2.putText(control_img, "Click 4 corners on 'Original Frame' for manual override",
                 (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    if debug_state.saved_quad is not None:
+    if state.saved_quad is not None:
         cv2.putText(control_img, "Loaded saved quad from last_quad.json (cyan)",
                     (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
     else:
         cv2.putText(control_img, "No saved quad found in last_quad.json",
                     (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     cv2.imshow("Debug Controls", control_img)
-    debug_state.windows_created = True
+    state.windows_created = True
 
 
 def update_debug_windows():
-    if not debug_state.windows_created or debug_state.frame is None:
+    if not state.windows_created or state.frame is None:
         return
-    H, W = debug_state.frame.shape[:2]
-    mask = get_red_mask(debug_state.frame, debug_state.config)
-    debug_state.mask = mask
-    dbg_ransac = debug_state.frame.copy()
-    auto_quad = find_field_quad_robust(mask, config=debug_state.config, debug_img=dbg_ransac)
+    H, W = state.frame.shape[:2]
+    mask = get_red_mask(state.frame, state.config)
+    state.mask = mask
+    dbg_ransac = state.frame.copy()
+    auto_quad = find_quad_ransac(mask, config=state.config, debug_img=dbg_ransac)
     method = "RANSAC"
-
     if auto_quad is None:
-        auto_quad = find_field_quad(mask, debug_img=None, config=debug_state.config)
+        auto_quad = find_quad_classic(mask, debug_img=None, config=state.config)
         method = "Classic"
 
-    debug_state.auto_quad = auto_quad
+    state.auto_quad = auto_quad
+    img_orig = state.frame.copy()
 
-    img_orig = debug_state.frame.copy()
-
-    # Отображаем сохранённый квад (если есть) — голубым пунктиром
-    if debug_state.saved_quad is not None:
-        pts_saved = debug_state.saved_quad.astype(int)
+    if state.saved_quad is not None:
+        pts_saved = state.saved_quad.astype(int)
         cv2.polylines(img_orig, [pts_saved], True, (255, 200, 0), 2)
         cv2.putText(img_orig, "Saved (last_quad.json)", (20, 80),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 200, 0), 2)
@@ -960,22 +911,24 @@ def update_debug_windows():
         cv2.polylines(img_orig, [pts_auto], True, (0, 255, 0), 2)
         cv2.putText(img_orig, f"Auto: {method}", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-    for i, pt in enumerate(debug_state.user_points):
+
+    for i, pt in enumerate(state.user_points):
         cv2.circle(img_orig, pt, 8, (0, 255, 255), -1)
         cv2.putText(img_orig, str(i + 1), (pt[0] + 10, pt[1] + 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
     show_debug("1. Original Frame", img_orig)
     show_debug("2. Red Mask", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
     show_debug("3. RANSAC Debug (NEW)", dbg_ransac)
 
-    dbg_hough = debug_state.frame.copy()
+    dbg_hough = state.frame.copy()
     lines = cv2.HoughLinesP(mask, rho=1, theta=np.pi / 180,
-                            threshold=debug_state.config['hough']['threshold'],
-                            minLineLength=debug_state.config['hough']['minLineLength'],
-                            maxLineGap=debug_state.config['hough']['maxLineGap'])
+                            threshold=state.config['hough']['threshold'],
+                            minLineLength=state.config['hough']['minLineLength'],
+                            maxLineGap=state.config['hough']['maxLineGap'])
     if lines is not None and len(lines) >= 4:
         quad_hough = find_quad_by_hough_enhanced(lines, H, W, dbg_hough,
-                                                 debug_state.config['filter'])
+                                                 state.config['filter'])
         status_hough = "VALID" if quad_hough is not None else "FAILED"
     else:
         status_hough = "NO LINES"
@@ -983,9 +936,9 @@ def update_debug_windows():
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
     show_debug("4. Algo 2: Hough (legacy)", dbg_hough)
 
-    if debug_state.refined_quad is not None:
-        dbg_refined = debug_state.frame.copy()
-        pts_ref = debug_state.refined_quad.astype(int)
+    if state.refined_quad is not None:
+        dbg_refined = state.frame.copy()
+        pts_ref = state.refined_quad.astype(int)
         cv2.polylines(dbg_refined, [pts_ref], True, (255, 0, 255), 4)
         show_debug("5. Refined Quad (user)", dbg_refined)
 
@@ -1002,12 +955,14 @@ def refine_quad_with_user_points(mask: np.ndarray, user_points: List[Tuple[int, 
                             maxLineGap=config['hough']['maxLineGap'])
     if lines is None or len(lines) < 4:
         return None
+
     segments = []
     for l in lines:
         x1, y1, x2, y2 = l[0]
         length = np.hypot(x2 - x1, y2 - y1)
         angle = np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180
         segments.append((x1, y1, x2, y2, length, angle))
+
     refined_lines = []
     cos_max = np.cos(np.radians(max_angle_deg))
     for i in range(4):
@@ -1031,6 +986,7 @@ def refine_quad_with_user_points(mask: np.ndarray, user_points: List[Tuple[int, 
             if abs(np.cross(side_dir, seg_center - p1)) > max_dist:
                 continue
             good.append(seg)
+
         if len(good) < 2:
             pts_for_line = np.array([p1, p2], dtype=np.float32).reshape(-1, 2)
             line = cv2.fitLine(pts_for_line, cv2.DIST_L2, 0, 0.01, 0.01)
@@ -1061,38 +1017,36 @@ def interactive_gui_mode(source: str):
     print("=" * 70)
     print("ИНТЕРАКТИВНЫЙ РЕЖИМ С GUI (RANSAC-powered)")
     print("=" * 70)
-    print("\n🎯 НОВЫЙ АЛГОРИТМ: RANSAC — работает при 50-70% перекрытиях рамки")
-    print("🎛️  Трекбары: HSV, морфология, RANSAC (итерации, порог, % inliers)")
-    print("📋 Клавиши: 'p' = print config, 'w' = warp, 's' = save quad, 'c' = clear points, 'q' = quit\n")
+    print("\nНОВЫЙ АЛГОРИТМ: RANSAC — работает при 50-70% перекрытиях рамки")
+    print("Трекбары: HSV, морфология, RANSAC (итерации, порог, % inliers)")
+    print("Клавиши: 'p' = print config, 'w' = warp, 's' = save quad, 'c' = clear points, 'q' = quit\n")
 
-    # Загружаем сохранённый квад для отображения
-    debug_state.saved_quad = load_last_quad()
-    if debug_state.saved_quad is not None:
-        print(f"📂 Загружен сохранённый квад из {LAST_QUAD_FILE}")
+    state.saved_quad = load_last_quad()
+    if state.saved_quad is not None:
+        print(f"Загружен сохранённый квад из {LAST_QUAD_PATH}")
     else:
-        print(f"ℹ️  Файл {LAST_QUAD_FILE} не найден — сохранённого квада нет.")
+        print(f"Файл {LAST_QUAD_PATH} не найден — сохранённого квада нет.")
 
-    debug_state.frame = grab_frame(source)
-    H, W = debug_state.frame.shape[:2]
+    state.frame = grab_frame(source)
+    H, W = state.frame.shape[:2]
     create_debug_gui(H, W)
-
     update_debug_windows()
 
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            if len(debug_state.user_points) < 4:
-                debug_state.user_points.append((x, y))
-                print(f"Точка {len(debug_state.user_points)}: ({x}, {y})")
-                if len(debug_state.user_points) == 4:
+            if len(state.user_points) < 4:
+                state.user_points.append((x, y))
+                print(f"Точка {len(state.user_points)}: ({x}, {y})")
+                if len(state.user_points) == 4:
                     refined = refine_quad_with_user_points(
-                        debug_state.mask, debug_state.user_points, debug_state.config)
+                        state.mask, state.user_points, state.config)
                     if refined is not None:
-                        debug_state.refined_quad = refined
-                        print("✅ Уточнённый квад построен.")
+                        state.refined_quad = refined
+                        print("Уточнённый квад построен.")
                     else:
-                        debug_state.refined_quad = order_points(
-                            np.array(debug_state.user_points, dtype=np.float32))
-                        print("⚠️ Уточнение не удалось, использую клики.")
+                        state.refined_quad = order_points(
+                            np.array(state.user_points, dtype=np.float32))
+                        print("Warning: Уточнение не удалось, использую клики.")
                     update_debug_windows()
             else:
                 print("Уже есть 4 точки. 'c' — очистить.")
@@ -1100,49 +1054,49 @@ def interactive_gui_mode(source: str):
 
     cv2.setMouseCallback("1. Original Frame", mouse_callback)
 
-    if debug_state.auto_quad is None:
-        print("\n⚠️ АВТО-КВАД НЕ НАЙДЕН. Кликните 4 угла вручную.\n")
+    if state.auto_quad is None:
+        print("\nWarning: АВТО-КВАД НЕ НАЙДЕН. Кликните 4 угла вручную.\n")
     else:
-        print("\n✅ Квад найден. При желании уточните кликами и нажмите 'w'.\n")
+        print("\nКвад найден. При желании уточните кликами и нажмите 'w'.\n")
 
     while True:
         key = cv2.waitKey(100) & 0xFF
-        debug_state.update_config_from_trackbar()
+        state.update_config_from_trackbar()
         if key == ord('p'):
-            debug_state.print_config_as_code()
+            state.print_config_as_code()
         if key == ord('q'):
             break
         if key == ord('c'):
-            debug_state.user_points.clear()
-            debug_state.refined_quad = None
+            state.user_points.clear()
+            state.refined_quad = None
             update_debug_windows()
         if key == ord('s'):
-            if debug_state.refined_quad is not None:
-                save_last_quad(debug_state.refined_quad)
-                debug_state.saved_quad = debug_state.refined_quad
-            elif debug_state.auto_quad is not None:
-                save_last_quad(debug_state.auto_quad)
-                debug_state.saved_quad = debug_state.auto_quad
+            if state.refined_quad is not None:
+                save_last_quad(state.refined_quad)
+                state.saved_quad = state.refined_quad
+            elif state.auto_quad is not None:
+                save_last_quad(state.auto_quad)
+                state.saved_quad = state.auto_quad
             else:
-                print("⚠️ Нет квада для сохранения. Выберите 4 точки или настройте RANSAC.")
+                print("Warning: Нет квада для сохранения. Выберите 4 точки или настройте RANSAC.")
             update_debug_windows()
         if key == ord('w'):
             quad_to_use = None
-            if debug_state.refined_quad is not None:
-                quad_to_use = debug_state.refined_quad
+            if state.refined_quad is not None:
+                quad_to_use = state.refined_quad
                 print("Использую уточнённый/ручной квад.")
-            elif debug_state.auto_quad is not None:
-                quad_to_use = debug_state.auto_quad
+            elif state.auto_quad is not None:
+                quad_to_use = state.auto_quad
                 print("Использую авто-квад.")
-            elif debug_state.saved_quad is not None:
-                quad_to_use = debug_state.saved_quad
+            elif state.saved_quad is not None:
+                quad_to_use = state.saved_quad
                 print("Использую сохранённый квад.")
             else:
                 print("Нет квада. Задайте 4 точки или настройте RANSAC.")
                 continue
-            warped = warp_field(debug_state.frame, quad_to_use, 1000, 1000)
+            warped = warp_field(state.frame, quad_to_use, 1000, 1000)
             warped = crop_1_percent(warped, (1000, 1000))
-            filename = "refined_field.png" if debug_state.refined_quad else "auto_field.png"
+            filename = "refined_field.png" if state.refined_quad else "auto_field.png"
             cv2.imwrite(filename, warped)
             cv2.imshow("Warped Field", warped)
 
@@ -1156,8 +1110,7 @@ def main():
     ap.add_argument("-d", "--debug", action="store_true")
     ap.add_argument("--gui", action="store_true")
     ap.add_argument("--hands", action="store_true",
-                    help="Разрешить ручной выбор углов, если авто-методы не сработали "
-                         "(иначе берутся координаты из предыдущего запуска)")
+                    help="Разрешить ручной выбор углов, если авто-методы не сработали")
     args = ap.parse_args()
 
     if args.gui:
@@ -1178,7 +1131,7 @@ def main():
 
     if field is not None:
         cv2.imwrite(args.output, field)
-        print(f"✅ Поле сохранено: {args.output} (1000x1000)")
+        print(f"Поле сохранено: {args.output} (1000x1000)")
     else:
         sys.exit(1)
 
