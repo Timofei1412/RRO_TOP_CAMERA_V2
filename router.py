@@ -36,6 +36,8 @@ class FieldRouter:
         down_h = hd[ramp_dir]
         up_h = (down_h + 2) % 4
 
+        currentData = self.grid.get((r, c))
+
         dr_d, dc_d = HEADING_DELTA[down_h]
         r_d, c_d = r + dr_d, c + dc_d
         down_data = self.grid.get((r_d, c_d))
@@ -44,9 +46,25 @@ class FieldRouter:
         r_u, c_u = r + dr_u, c + dc_u
         up_data = self.grid.get((r_u, c_u))
 
-        if not down_data or not up_data: return False
-        if down_data.get("level", 0) != 0 or down_data.get("ramp", 0) > 0: return False
-        if up_data.get("level", 0) != 1 or up_data.get("ramp", 0) > 0: return False
+        if not down_data or not up_data: return False # если за границей
+        if down_data.get("level", 0) != 0 or down_data.get("ramp", 0) > 0: return False # спускаемся вверх или там пандус
+        
+        
+        if up_data.get("level", 0) != 1 and up_data.get("ramp", 0) == 0: return False # сверху второй этаж без пандуса
+
+        if up_data.get("ramp", 0) > 0:
+            
+            up_ramp_dir = up_data.get("ramp_dir_precise", "")
+            if up_ramp_dir in hd:
+                up_down_h = hd[up_ramp_dir]
+                # Направление вниз соседнего пандуса должно смотреть на нас
+                h = (up_down_h + 2) % 4
+                up_dr, up_dc = HEADING_DELTA[h]
+                up_r_d, up_c_d = r_u + up_dr, c_u + up_dc
+                if (up_r_d, up_c_d) != (r, c):
+                    return False
+            else:
+                return False
         return True
 
     def _build_graph(self):
