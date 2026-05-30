@@ -1,9 +1,4 @@
-"""
-carry_planner.py — Планировщик перевозки труб для Future Engineers (RRO 2026).
-Поддерживает многоэтажные поля с рампами.
-Команды: F{n}, R, L, around, U, D, T, P (без ID)
-Логика: F перед D и после U уменьшается на 1 (F0 удаляется).
-"""
+# carry_planner.py
 import itertools
 import cv2
 import numpy as np
@@ -151,7 +146,6 @@ class CarryPlanner:
             start = robot_start
         if not self.tubes or not self.pods: return None
         
-        # Максимально возможное число труб, которое можно увезти
         max_tubes = min(len(self.tubes), len(self.pods))
         if max_tubes == 0: return None
         
@@ -170,7 +164,6 @@ class CarryPlanner:
         best, checked = None, 0
         for num_tubes in range(max_tubes, 0, -1):
             if best is not None:
-                # Нашли рабочий план с максимальным кол-вом труб, дальше искать нет смысла
                 break
             for tube_sel in itertools.combinations(self.tubes, num_tubes):
                 for pod_sel in itertools.combinations(self.pods, num_tubes):
@@ -250,14 +243,17 @@ class CarryPlanner:
                 for col in range(cols):
                     x1,y1 = margin+col*cell_size, margin+r*cell_size
                     d = self.router.grid.get((r,col),{})
-                    bg = (60,60,60) if (d.get("level",0)==1 or d.get("ramp",0) >0) else (210,210,210)
+                    bg = (60,60,60) if (d.get("level",0)==1 or d.get("ramp",0) > 0) else (210,210,210)
                     cv2.rectangle(c,(x1,y1),(x1+cell_size,y1+cell_size),bg,-1); cv2.rectangle(c,(x1,y1),(x1+cell_size,y1+cell_size),(0,0,0),1)
                     cv2.putText(c,str(r*8+col),(x1+4,y1+18),cv2.FONT_HERSHEY_SIMPLEX,0.4,(0,0,0) if bg==(210,210,210) else (255,255,255),1)
-                    if d.get("ramp",0) >0:
+                    if d.get("ramp",0) > 0:
                         cx,cy = x1+cell_size//2, y1+cell_size//2
                         col_ln = (0,165,255)
-                        if d["ramp"]==2: cv2.arrowedLine(c,(cx,cy-25),(cx,cy+25),col_ln,3,line_type=cv2.LINE_AA,tipLength=0.3)
-                        else: cv2.arrowedLine(c,(cx-25,cy),(cx+25,cy),col_ln,3,line_type=cv2.LINE_AA,tipLength=0.3)
+                        ramp_dir = d.get("ramp_dir_precise", 0)
+                        if ramp_dir == 'S': cv2.arrowedLine(c,(cx,cy-25),(cx,cy+25),col_ln,3,line_type=cv2.LINE_AA,tipLength=0.3)
+                        elif ramp_dir == 'N': cv2.arrowedLine(c,(cx,cy+25),(cx,cy-25),col_ln,3,line_type=cv2.LINE_AA,tipLength=0.3)
+                        elif ramp_dir == 'E': cv2.arrowedLine(c,(cx-25,cy),(cx+25,cy),col_ln,3,line_type=cv2.LINE_AA,tipLength=0.3)
+                        elif ramp_dir == 'W': cv2.arrowedLine(c,(cx+25,cy),(cx-25,cy),col_ln,3,line_type=cv2.LINE_AA,tipLength=0.3)
 
         def draw_obj(c):
             for t in self.tubes:

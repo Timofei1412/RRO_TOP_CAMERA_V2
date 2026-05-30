@@ -1,8 +1,4 @@
-"""
-router.py — Маршрутизатор для Future Engineers (RRO 2026).
-Граф строится ОДИН раз при инициализации. Строго ДВУНАПРАВЛЕННЫЙ.
-Добавлена фильтрация "тупиковых" пандусов (закрытых снизу).
-"""
+# router.py
 import heapq
 import json
 import os
@@ -11,7 +7,6 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 
-# === Константы направлений ===
 HEADING_N, HEADING_E, HEADING_S, HEADING_W = 0, 1, 2, 3
 HEADING_NAMES = {0: "N", 1: "E", 2: "S", 3: "W"}
 HEADING_DELTA = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
@@ -22,7 +17,7 @@ class FieldRouter:
     def __init__(self, map_data: List[Dict], debug: bool = False):
         self.map_data = map_data
         self.grid = {(item['row'], item['col']): item for item in map_data}
-        self.nodes, self.edges, self.blocked, self.ramp_axes = set(), {}, {}, {}
+        self.nodes, self.edges, self.blocked, self.ramp_info = set(), {}, {}, {}
         self.debug = debug
         self._build_graph()
 
@@ -30,57 +25,70 @@ class FieldRouter:
         data = self.grid.get((r, c))
         if not data:
             return True, "outside"
-        if data.get("redTube", 0) or data.get("blueTube", 0) or data.get("green", 0):
+        if data.get("redTube", 0) > 0 or data.get("blueTube", 0) > 0 or data.get("green", 0) > 0:
             return True, "obstacle"
         if data.get("ramp", 0) > 0:
-            return (level != 1), "ramp_level"
+            return False, ""
         return (level != data.get("level", 0)), "level_mismatch"
 
-    def _get_ramp_axes(self, r: int, c: int) -> List[int]:
-        data = self.grid.get((r, c))
-        if not data or data.get("ramp", 0) == 0:
-            return []
-        ramp_type = data["ramp"]
-        return [HEADING_E, HEADING_W] if ramp_type == 1 else [HEADING_N, HEADING_S]
+    def _is_valid_ramp(self, r: int, c: int, ramp_dir_precise) -> bool:
+        if ramp_dir_precise not in ('N', 'S', 'E', 'W'):
+            return False
+            
+        heading_map = {'N': HEADING_N, 'E': HEADING_E, 'S': HEADING_S, 'W': HEADING_W}
+        down_h = heading_map[ramp_dir_precise]
+        up_h = (down_h + 2) % 4
+        
+        dr_d, dc_d = HEADING_DELTA[down_h]
+        r_d, c_d = r + dr_d, c + dc_d
+        down_data = self.grid.get((r_d, c_d))
+        
+        dr_u, dc_u = HEADING_DELTA[up_h]
+        r_u, c_u = r + dr_u, c + dc_u
+        up_data = self.grid.get((r_u, c_u))
+        
+        if not down_data or not up_data:
+            return False
+            
+        if down_data.get("level", 0) != 0 or down_data.get("ramp", 0) > 0:
+            return False
+            
+        if up_data.get("level", 0) != 1 or up_data.get("ramp", 0) > 0:
+            return False
+            
+        return True
 
     def _build_graph(self):
-        # Pass 1: Сбор всех потенциальных узлов
         potential_nodes = set()
         for (r, c), data in self.grid.items():
             has_ramp = data.get("ramp", 0) > 0
-            level = 1 if has_ramp else data.get("level", 0)
-            node = (r, c, level)
-            blocked, reason = self._is_blocked(r, c, level)
-            if not blocked:
-                potential_nodes.add(node)
-                if has_ramp:
-                    axes = self._get_ramp_axes(r, c)
-                    if axes:
-                        self.ramp_axes[(r, c)] = axes
+            if has_ramp:
+                ramp_dir = data.get("ramp_dir_precise")
+                if not self._is_valid_ramp(r, c, ramp_dir):
+                    self.blocked[(r, c, 1)] = "invalid_ramp"
+                    self.blocked[(r, c, 0)] = "invalid_ramp"
+                    continue
+                
+                heading_map = {'N': HEADING_N, 'E': HEADING_E, 'S': HEADING_S, 'W': HEADING_W}
+                down_h = heading_map[ramp_dir]
+                up_h = (down_h + 2) % 4
+                self.ramp_info[(r, c)] = (down_h, up_h)
+                
+                potential_nodes.add((r, c, 1))
+                self.blocked[(r, c, 0)] = "under_ramp"
             else:
-                self.blocked[node] = reason
+                level = data.get("level", 0)
+                node = (r, c, level)
+                blocked, reason = self._is_blocked(r, c, level)
+                if not blocked:
+                    potential_nodes.add(node)
+                else:
+                    self.blocked[node] = reason
 
-        # Pass 2: Фильтрация "тупиковых" пандусов (закрытых снизу)
         self.nodes = set()
         for node in potential_nodes:
-            r, c, level = node
-            data = self.grid.get((r, c))
-            has_ramp = data.get("ramp", 0) > 0
-            if has_ramp and level == 1:
-                has_valid_l0_exit = False
-                for ramp_dir in self.ramp_axes.get((r, c), []):
-                    dr, dc = HEADING_DELTA[ramp_dir]
-                    nr, nc = r + dr, c + dc
-                    neighbor_down = (nr, nc, 0)
-                    if neighbor_down in potential_nodes:
-                        has_valid_l0_exit = True
-                        break
-                if not has_valid_l0_exit:
-                    self.blocked[node] = "dead_end_ramp"
-                    continue
             self.nodes.add(node)
 
-        # Pass 3: Построение рёбер только для валидных узлов
         for node in self.nodes:
             self.edges[node] = []
             r, c, level = node
@@ -88,40 +96,52 @@ class FieldRouter:
             has_ramp = data.get("ramp", 0) > 0
 
             if has_ramp and level == 1:
-                for ramp_dir in self.ramp_axes.get((r, c), []):
-                    dr, dc = HEADING_DELTA[ramp_dir]
-                    nr, nc = r + dr, c + dc
-                    neighbor_down = (nr, nc, 0)
-                    if neighbor_down in self.nodes:
-                        self.edges[node].append((neighbor_down, RAMP_COST, ("ramp_down", ramp_dir)))
-                    neighbor_l1 = (nr, nc, 1)
-                    if neighbor_l1 in self.nodes:
-                        self.edges[node].append((neighbor_l1, MOVE_COST, ("move", ramp_dir)))
+                down_h, up_h = self.ramp_info.get((r, c), (None, None))
+                if down_h is None: 
+                    continue
+                
+                dr_d, dc_d = HEADING_DELTA[down_h]
+                neighbor_down = (r + dr_d, c + dc_d, 0)
+                if neighbor_down in self.nodes:
+                    self.edges[node].append((neighbor_down, RAMP_COST, ("ramp_down", down_h)))
+                    
+                dr_u, dc_u = HEADING_DELTA[up_h]
+                neighbor_up_l1 = (r + dr_u, c + dc_u, 1)
+                if neighbor_up_l1 in self.nodes:
+                    self.edges[node].append((neighbor_up_l1, MOVE_COST, ("move", up_h)))
+                    
             elif level == 0:
                 for heading, (dr, dc) in HEADING_DELTA.items():
                     nr, nc = r + dr, c + dc
                     neighbor = (nr, nc, 0)
                     if neighbor in self.nodes:
                         self.edges[node].append((neighbor, MOVE_COST, ("move", heading)))
+                    
                     n_data = self.grid.get((nr, nc))
                     if n_data and n_data.get("ramp", 0) > 0:
-                        ramp_dirs = self.ramp_axes.get((nr, nc), [])
-                        opposite_heading = (heading + 2) % 4
-                        if opposite_heading in ramp_dirs: 
-                            neighbor_up = (nr, nc, 1)
-                            if neighbor_up in self.nodes:
-                                self.edges[node].append((neighbor_up, RAMP_COST, ("ramp_up", heading)))
-            else:
+                        info = self.ramp_info.get((nr, nc))
+                        if info:
+                            down_h, up_h = info
+                            if heading == up_h:
+                                neighbor_ramp = (nr, nc, 1)
+                                if neighbor_ramp in self.nodes:
+                                    self.edges[node].append((neighbor_ramp, RAMP_COST, ("ramp_up", heading)))
+                                    
+            elif level == 1:
                 for heading, (dr, dc) in HEADING_DELTA.items():
                     nr, nc = r + dr, c + dc
                     n_data = self.grid.get((nr, nc))
+                    
                     if n_data and n_data.get("ramp", 0) > 0:
-                        ramp_dirs = self.ramp_axes.get((nr, nc), [])
-                        if heading in ramp_dirs:
-                            neighbor_ramp = (nr, nc, 1)
-                            if neighbor_ramp in self.nodes:
-                                self.edges[node].append((neighbor_ramp, MOVE_COST, ("move", heading)))
-                        continue
+                        info = self.ramp_info.get((nr, nc))
+                        if info:
+                            down_h, up_h = info
+                            if heading == down_h:
+                                neighbor_ramp = (nr, nc, 1)
+                                if neighbor_ramp in self.nodes:
+                                    self.edges[node].append((neighbor_ramp, MOVE_COST, ("move", heading)))
+                            continue 
+                    
                     neighbor = (nr, nc, 1)
                     if neighbor in self.nodes:
                         self.edges[node].append((neighbor, MOVE_COST, ("move", heading)))
@@ -244,7 +264,7 @@ class FieldRouter:
             "nodes": [list(n) for n in sorted(self.nodes)],
             "edges": {f"{n[0]},{n[1]},{n[2]}": [{"to": list(nb), "cost": c, "action": list(a)} for nb, c, a in edges] for n, edges in self.edges.items()},
             "blocked": {f"{k[0]},{k[1]},{k[2]}": v for k, v in self.blocked.items()},
-            "ramp_axes": {f"{k[0]},{k[1]}": [HEADING_NAMES[v] for v in axes] for k, axes in self.ramp_axes.items()},
+            "ramp_info": {f"{k[0]},{k[1]}": {"down": HEADING_NAMES[v[0]], "up": HEADING_NAMES[v[1]]} for k, v in self.ramp_info.items()},
             "stats": {"total_nodes": len(self.nodes), "total_edges": sum(len(v) for v in self.edges.values()), "level_0_nodes": sum(1 for n in self.nodes if n[2] == 0), "level_1_nodes": sum(1 for n in self.nodes if n[2] == 1)},
         }
         with open(os.path.join(out_dir, "graph.json"), "w", encoding="utf-8") as f:
@@ -253,7 +273,8 @@ class FieldRouter:
     def print_graph_stats(self):
         l0 = sum(1 for n in self.nodes if n[2] == 0)
         l1 = sum(1 for n in self.nodes if n[2] == 1)
-        dead_ends = sum(1 for v in self.blocked.values() if v == "dead_end_ramp")
+        invalid_ramps = sum(1 for v in self.blocked.values() if v == "invalid_ramp")
+        print(f"Граф построен: узлов L0={l0}, L1={l1}, невалидных пандусов={invalid_ramps}")
 
 def print_route(commands, total_cost, raw_path, start_heading=HEADING_N):
     for i, cmd in enumerate(commands, 1): print(f"   {i}. {cmd}")
@@ -294,8 +315,11 @@ class InteractiveRouter:
                 if has_ramp:
                     cx, cy = x1 + cs // 2, y1 + cs // 2
                     col = (0, 165, 255)
-                    if data["ramp"] == 2: cv2.arrowedLine(self.canvas_base, (cx, cy - 30), (cx, cy + 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    else: cv2.arrowedLine(self.canvas_base, (cx - 30, cy), (cx + 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    ramp_dir = data.get("ramp_dir_precise", 0)
+                    if ramp_dir == 'S': cv2.arrowedLine(self.canvas_base, (cx, cy - 30), (cx, cy + 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif ramp_dir == 'N': cv2.arrowedLine(self.canvas_base, (cx, cy + 30), (cx, cy - 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif ramp_dir == 'E': cv2.arrowedLine(self.canvas_base, (cx - 30, cy), (cx + 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif ramp_dir == 'W': cv2.arrowedLine(self.canvas_base, (cx + 30, cy), (cx - 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
 
     def _xy_to_cell(self, x, y):
         c = (x - self.margin) // self.cell_size
@@ -323,7 +347,7 @@ class InteractiveRouter:
                 self.commands_short = ""
             else:
                 self.goal_cell = cell
-                res = self.router.find_path(self.start_cell, self.goal_cell, self.start_heading, prefer_straight=self.prefer_straight)
+                res = self.router.find_path(self.start_cell, self.goal_cell, self.start_heading, prefer_straight=self.prefer_straight) 
                 self.last_path = res
                 if res:
                     print_route(*res, self.start_heading)
@@ -356,14 +380,14 @@ class InteractiveRouter:
         bar_h = 80; h_can, w_can = canvas.shape[:2]
         cv2.rectangle(canvas, (0, h_can - bar_h), (w_can, h_can), (40, 40, 40), -1)
         cv2.putText(canvas, self.status_msg, (self.margin, h_can - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        if self.commands_short:
+        if self.commands_short: 
             label = f"Route: {self.commands_short}"
             if len(label) > 75: label = label[:72] + "..."
             cv2.putText(canvas, label, (self.margin, h_can - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 255), 1)
         cv2.imshow("Router", canvas)
 
     def run(self):
-        mode = "🎮 Интерактивный режим"
+        mode = "Интерактивный режим"
         if self.prefer_straight: mode += " [SPEED: меньше поворотов]"
         print(f"{mode}. ЛКМ - старт/цель, ПКМ - сброс, WASD - heading, Q/Esc - выход")
         self._redraw()
@@ -397,7 +421,7 @@ class CarryInteractiveRouter:
         self.robot_start = robot_start
         if robot_start:
             self.start_cell = robot_start
-            self.status_msg = f"🤖 Робот найден на {robot_start} | WASD - heading | Enter - отправить | Q - выход"
+            self.status_msg = f"Робот найден на {robot_start} | WASD - heading | Enter - отправить | Q - выход"
         else:
             self.status_msg = "ЛКМ - старт робота | WASD - heading | Enter - отправить | Q - выход"
         self.commands_short = ""
@@ -424,8 +448,11 @@ class CarryInteractiveRouter:
                 cx, cy = x1 + cs // 2, y1 + cs // 2
                 if has_ramp:
                     col = (0, 165, 255)
-                    if data["ramp"] == 2: cv2.arrowedLine(self.canvas_base, (cx, cy - 30), (cx, cy + 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    else: cv2.arrowedLine(self.canvas_base, (cx - 30, cy), (cx + 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    ramp_dir = data.get("ramp_dir_precise", 0)
+                    if ramp_dir == 'S': cv2.arrowedLine(self.canvas_base, (cx, cy - 30), (cx, cy + 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif ramp_dir == 'N': cv2.arrowedLine(self.canvas_base, (cx, cy + 30), (cx, cy - 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif ramp_dir == 'E': cv2.arrowedLine(self.canvas_base, (cx - 30, cy), (cx + 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif ramp_dir == 'W': cv2.arrowedLine(self.canvas_base, (cx + 30, cy), (cx - 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
                 rt = data.get("redTube", 0)
                 if rt > 0:
                     if rt == 1: cv2.rectangle(self.canvas_base, (cx - 6, cy - 22), (cx + 6, cy + 22), (0, 0, 255), 3)
@@ -451,21 +478,21 @@ class CarryInteractiveRouter:
 
     def _plan_from(self, cell: Tuple[int, int]):
         self.start_cell = cell
-        self.status_msg = f"🤖 Планирую от {cell} (heading={HEADING_NAMES[self.start_heading]})..."
+        self.status_msg = f"Планирую от {cell} (heading={HEADING_NAMES[self.start_heading]})..."
         self.commands_short = "PLANNING..."
         self._redraw(); cv2.waitKey(10)
         self.plan = self.planner.plan(cell, self.start_heading, verbose=True, animate=False, robot_start=self.robot_start, prefer_straight=self.prefer_straight)
         if self.plan:
             self.planner.print_plan(self.plan)
             self.commands_short = self.cmd_to_short(self.plan["commands"])
-            src = "🤖 АВТО" if self.robot_start else "🖱️ РУЧНОЙ"
-            self.status_msg = f"✅ План готов ({src}) | Start={cell} | Cost={self.plan['total_cost']:.2f} | Сегментов: {len(self.plan['segments'])} | Enter - отправить | WASD - heading"
+            src = "АВТО" if self.robot_start else "РУЧНОЙ"
+            self.status_msg = f"План готов ({src}) | Start={cell} | Cost={self.plan['total_cost']:.2f} | Сегментов: {len(self.plan['segments'])} | Enter - отправить | WASD - heading"
             if self.animate_enabled:
                 self.plan["start_heading"] = self.start_heading
                 self.planner.animate_plan(self.plan)
         else:
             self.commands_short = "NO PLAN"
-            self.status_msg = f"❌ План не найден от {cell} | WASD - сменить heading, R - reset"
+            self.status_msg = f"План не найден от {cell} | WASD - сменить heading, R - reset"
         self._redraw()
 
     def _on_mouse(self, event, x, y, flags, param):
@@ -478,7 +505,7 @@ class CarryInteractiveRouter:
             self.start_cell = self.plan = None
             if self.robot_start:
                 self.start_cell = self.robot_start
-                self.status_msg = f"🤖 Робот на {self.robot_start} | WASD - heading | R - reset | Q/Esc - выход"
+                self.status_msg = f"Робот на {self.robot_start} | WASD - heading | R - reset | Q/Esc - выход"
             else:
                 self.status_msg = "ЛКМ - старт робота | WASD - heading | R - reset | Q/Esc - выход"
             self.commands_short = ""
@@ -528,7 +555,7 @@ class CarryInteractiveRouter:
         while True:
             key = cv2.waitKey(50) & 0xFF
             if key in (13, 10): send_to_robot = True; break
-            if key in (27, ord('q')): send_to_robot = False; self.plan = None; print("❌ Отменено пользователем — отправка на робота пропущена."); break
+            if key in (27, ord('q')): send_to_robot = False; self.plan = None; print("Отменено пользователем — отправка на робота пропущена."); break
             if key == ord('r'):
                 self.plan = None
                 if self.robot_start:
@@ -565,13 +592,17 @@ def main():
     ap.add_argument("--animate", action="store_true", help="Показать анимацию выполнения плана")
     ap.add_argument("--speed", action="store_true", help="При равной длине маршрута выбирать путь с меньшим числом поворотов")
     args = ap.parse_args()
+
     if not os.path.isfile(args.map): print(f"Файл не найден: {args.map}"); return
     with open(args.map, "r", encoding="utf-8") as f: map_data = json.load(f)
+
     router = FieldRouter(map_data, debug=True)
     router.print_graph_stats()
     router.save_graph(os.path.dirname(args.map) or "output")
+
     if args.carry: run_carry_interactive(map_data, animate=args.animate, prefer_straight=args.speed); return
     if args.interactive: run_interactive(map_data, prefer_straight=args.speed); return
+
     if args.start and args.goal:
         start = tuple(int(x) for x in args.start.split(","))
         goal = tuple(int(x) for x in args.goal.split(","))

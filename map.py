@@ -11,11 +11,13 @@ RED_LOWER1 = np.array([0, 70, 50])
 RED_UPPER1 = np.array([10, 255, 255])
 RED_LOWER2 = np.array([160, 70, 50])
 RED_UPPER2 = np.array([180, 255, 255])
+
 BLUE_LOWER = np.array([100, 70, 50])
 BLUE_UPPER = np.array([130, 255, 255])
+
 GREEN_LOWER = np.array([35, 50, 50])
 GREEN_UPPER = np.array([85, 255, 255])
-# === РОБОТ (оранжевый) ===
+
 ORANGE_LOWER = np.array([5, 100, 100])
 ORANGE_UPPER = np.array([25, 255, 255])
 
@@ -23,13 +25,11 @@ MIN_CONTOUR_AREA = 50
 ASPECT_RATIO_THRESHOLD = 1.8
 ROBOT_MIN_AREA_RATIO = 0.04
 
-
 def get_masks(img: np.ndarray) -> Dict[str, np.ndarray]:
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask_red1 = cv2.inRange(hsv, RED_LOWER1, RED_UPPER1)
     mask_red2 = cv2.inRange(hsv, RED_LOWER2, RED_UPPER2)
     mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-
     mask_blue = cv2.inRange(hsv, BLUE_LOWER, BLUE_UPPER)
     mask_green = cv2.inRange(hsv, GREEN_LOWER, GREEN_UPPER)
     mask_orange = cv2.inRange(hsv, ORANGE_LOWER, ORANGE_UPPER)
@@ -44,7 +44,6 @@ def get_masks(img: np.ndarray) -> Dict[str, np.ndarray]:
 
     return {"red": mask_red, "blue": mask_blue, "green": mask_green, "orange": mask_orange}
 
-
 def analyze_level(img: np.ndarray) -> int:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
@@ -52,7 +51,6 @@ def analyze_level(img: np.ndarray) -> int:
     total_pixels = img.shape[0] * img.shape[1]
     black_pixels = total_pixels - white_pixels
     return 1 if black_pixels > white_pixels else 0
-
 
 def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray,
                      row: int, col: int, img_shape: tuple) -> Dict:
@@ -113,18 +111,34 @@ def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray,
     red_circles, red_rectangles = process_mask(mask_red, is_red=True)
     blue_circles, blue_rectangles = process_mask(mask_blue, is_red=False)
 
-    ramp_type, ramp_angle = 0, 0.0
+    ramp_type, ramp_angle, ramp_dir_precise = 0, 0.0, 0
     c_red_ramp, c_blue_ramp = None, None
     if red_circles and blue_circles:
         c_r, _, _ = red_circles[0]
         c_b, _, _ = blue_circles[0]
-        dx = c_b[0] - c_r[0]
-        dy = c_b[1] - c_r[1]
+        
+        dx = c_r[0] - c_b[0]
+        dy = c_r[1] - c_b[1]
         angle_deg = math.degrees(math.atan2(dy, dx))
+        
         orient = angle_deg % 180
         if orient > 90:
             orient -= 180
         ramp_type = 2 if abs(orient) < 45 else 1
+        
+        norm_angle = angle_deg
+        if norm_angle < 0:
+            norm_angle += 360
+            
+        if 315 <= norm_angle or norm_angle < 45:
+            ramp_dir_precise = 'N'
+        elif 45 <= norm_angle < 135:
+            ramp_dir_precise = 'E'
+        elif 135 <= norm_angle < 225:
+            ramp_dir_precise = 'S'
+        elif 225 <= norm_angle < 315:
+            ramp_dir_precise = 'W'
+            
         ramp_angle = angle_deg
         c_red_ramp, c_blue_ramp = c_r, c_b
 
@@ -139,6 +153,7 @@ def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray,
     return {
         "ramp_type": ramp_type,
         "ramp_angle": round(ramp_angle, 2),
+        "ramp_dir_precise": ramp_dir_precise,
         "c_red_ramp": c_red_ramp,
         "c_blue_ramp": c_blue_ramp,
         "red_tube_type": red_tube_type,
@@ -148,7 +163,6 @@ def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray,
         "blue_tube_center": blue_tube_center,
         "blue_tube_box": blue_tube_box,
     }
-
 
 def analyze_green(mask_green: np.ndarray, row: int, col: int,
                   img_shape: tuple) -> Tuple[int, Optional[Tuple[int, int]], Optional[np.ndarray]]:
@@ -178,9 +192,7 @@ def analyze_green(mask_green: np.ndarray, row: int, col: int,
         return obj_type, center, box
     return 0, None, None
 
-
 def analyze_robot(mask_orange: np.ndarray, img_shape: tuple) -> Tuple[int, float]:
-    """Ищет крупный оранжевый объект (робота)."""
     H, W = img_shape[:2]
     sec_area = H * W
     contours, _ = cv2.findContours(mask_orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -192,7 +204,6 @@ def analyze_robot(mask_orange: np.ndarray, img_shape: tuple) -> Tuple[int, float
         return 0, area
     return 1, area
 
-
 def analyze_section(img: np.ndarray, row: int, col: int) -> Dict:
     level = analyze_level(img)
     masks = get_masks(img)
@@ -200,11 +211,9 @@ def analyze_section(img: np.ndarray, row: int, col: int) -> Dict:
     green_type, green_center, green_box = analyze_green(masks["green"], row, col, img.shape)
     robot_detected, robot_area = analyze_robot(masks["orange"], img.shape)
 
-    # Пандусы ВСЕГДА на уровне 0
     if rb_data["ramp_type"] > 0:
         level = 0
 
-    # Валидация робота: не на рампе, не с трубами, не с подставкой
     if robot_detected:
         if (rb_data["ramp_type"] > 0
                 or rb_data["red_tube_type"] > 0
@@ -217,6 +226,7 @@ def analyze_section(img: np.ndarray, row: int, col: int) -> Dict:
         "level": level,
         "ramp": rb_data["ramp_type"],
         "ramp_angle": rb_data["ramp_angle"],
+        "ramp_dir_precise": rb_data["ramp_dir_precise"],
         "ramp_centers": {"red": rb_data["c_red_ramp"], "blue": rb_data["c_blue_ramp"]},
         "green": green_type,
         "green_center": green_center,
@@ -231,14 +241,12 @@ def analyze_section(img: np.ndarray, row: int, col: int) -> Dict:
         "robot_area": robot_area,
     }
 
-
 def fix_cut_objects(map_data: List[Dict], sec_w: int, sec_h: int):
     grid = {(item['row'], item['col']): item for item in map_data}
     obj_types = ['redTube', 'blueTube', 'green']
     thresh_x = sec_w * 0.25
     thresh_y = sec_h * 0.25
     merged_count = 0
-
     for r in range(8):
         for c in range(8):
             item = grid.get((r, c))
@@ -274,11 +282,9 @@ def fix_cut_objects(map_data: List[Dict], sec_w: int, sec_h: int):
                                     merged_count += 1
 
     if merged_count > 0:
-        print(f"   🔧 Исправлено разрезанных объектов: {merged_count}")
-
+        print(f"   Исправлено разрезанных объектов: {merged_count}")
 
 def fix_robot_uniqueness(map_data: List[Dict]):
-    """Робот физически один — оставляем клетку с максимальной площадью."""
     robot_cells = [it for it in map_data if it.get("robot", 0) > 0]
     if len(robot_cells) <= 1:
         return
@@ -290,10 +296,9 @@ def fix_robot_uniqueness(map_data: List[Dict]):
             it["robot_area"] = 0.0
             cleared += 1
     if cleared > 0:
-        print(f"   🤖 Робот продублирован в {cleared + 1} секциях — "
+        print(f"   Робот продублирован в {cleared + 1} секциях — "
               f"оставлен в ({best['row']},{best['col']}) "
               f"(max area={best.get('robot_area', 0):.0f}px²)")
-
 
 def draw_direction_arrow(canvas, center, obj_type, color, length=25):
     if not center or obj_type == 0:
@@ -304,13 +309,11 @@ def draw_direction_arrow(canvas, center, obj_type, color, length=25):
     elif obj_type == 1:
         cv2.arrowedLine(canvas, (cx - length, cy), (cx + length, cy), color, 2, tipLength=0.3)
 
-
 def draw_box(canvas, box, offset_x, offset_y, color, thickness=2):
     pts = box.copy()
     pts[:, 0] += offset_x
     pts[:, 1] += offset_y
     cv2.drawContours(canvas, [pts], 0, color, thickness)
-
 
 def visualize_map_grid(map_data: List[Dict], sections: List[Tuple], max_dim: int = 1200):
     if not sections:
@@ -320,7 +323,6 @@ def visualize_map_grid(map_data: List[Dict], sections: List[Tuple], max_dim: int
     rows, cols = 8, 8
     canvas = np.zeros((h * rows, w * cols, 3), dtype=np.uint8)
     data_by_idx = {item['index']: item for item in map_data}
-
     for index, r, c, img in sections:
         y1, y2 = r * h, (r + 1) * h
         x1, x2 = c * w, (c + 1) * w
@@ -376,7 +378,8 @@ def visualize_map_grid(map_data: List[Dict], sections: List[Tuple], max_dim: int
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         info_y = y2 - 10
         if ramp > 0:
-            cv2.putText(canvas, f"R:{ramp}", (x1 + 5, info_y),
+            ramp_precise = data.get("ramp_dir_precise", "")
+            cv2.putText(canvas, f"R:{ramp}({ramp_precise})", (x1 + 5, info_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             info_y -= 12
         if g_type > 0:
@@ -397,7 +400,6 @@ def visualize_map_grid(map_data: List[Dict], sections: List[Tuple], max_dim: int
                             interpolation=cv2.INTER_AREA)
     cv2.imshow("Map Analysis (Grid)", canvas)
 
-
 def visualize_map_schematic(clean_map_data: List[Dict],
                             cell_size: int = 100, max_dim: int = 1000):
     rows, cols = 8, 8
@@ -406,7 +408,6 @@ def visualize_map_schematic(clean_map_data: List[Dict],
     canvas_h = rows * cell_size + margin * 2
     canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * 240
     data_by_idx = {item['index']: item for item in clean_map_data}
-
     for r in range(rows):
         for c in range(cols):
             x1 = margin + c * cell_size
@@ -439,7 +440,8 @@ def visualize_map_schematic(clean_map_data: List[Dict],
                 else:
                     cv2.arrowedLine(canvas, (cx - arrow_len, cy), (cx + arrow_len, cy),
                                     (0, 165, 255), 4, tipLength=0.3)
-                cv2.putText(canvas, f"R:{ramp}", (x1 + 5, y2 - 10),
+                ramp_precise = data.get("ramp_dir_precise", "")
+                cv2.putText(canvas, f"R:{ramp}({ramp_precise})", (x1 + 5, y2 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 2)
 
             g_type = data.get("green", 0)
@@ -462,7 +464,7 @@ def visualize_map_schematic(clean_map_data: List[Dict],
                     rect_w, rect_h = 44, 12
                 else:
                     rect_w, rect_h = 12, 44
-                offset_x = -8 if rt_type == 2 else 0
+                offset_x = -8 if rt_type == 2 else 0 
                 offset_y = -8 if rt_type == 1 else 0
                 rx1 = cx - rect_w // 2 + offset_x
                 ry1 = cy - rect_h // 2 + offset_y
@@ -516,7 +518,6 @@ def visualize_map_schematic(clean_map_data: List[Dict],
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-
 def _json_serializer(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -527,7 +528,6 @@ def _json_serializer(obj):
     if isinstance(obj, tuple):
         return list(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
 
 def run(sections: List[Tuple[int, int, int, np.ndarray]],
         out_dir: str,
@@ -542,6 +542,7 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]],
             "level": analysis["level"],
             "ramp": analysis["ramp"],
             "ramp_angle": analysis["ramp_angle"],
+            "ramp_dir_precise": analysis["ramp_dir_precise"],
             "ramp_centers": analysis["ramp_centers"],
             "green": analysis["green"],
             "green_center": analysis["green_center"],
@@ -556,7 +557,7 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]],
             "robot_area": analysis["robot_area"],
         }
         map_data.append(entry)
-
+        
     _, _, _, sample_img = sections[0]
     sec_h, sec_w = sample_img.shape[:2]
     fix_cut_objects(map_data, sec_w, sec_h)
@@ -576,6 +577,7 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]],
             "level": item["level"],
             "ramp": item["ramp"],
             "ramp_angle": item["ramp_angle"],
+            "ramp_dir_precise": item["ramp_dir_precise"],
             "green": item["green"],
             "redTube": item["redTube"],
             "blueTube": item["blueTube"],
@@ -589,17 +591,17 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]],
     if debug:
         for item in clean_map_data:
             parts = [f"Lvl:{item['level']}"]
-            if item['ramp'] > 0: parts.append(f"Ramp:{item['ramp']}")
+            if item['ramp'] > 0: 
+                parts.append(f"Ramp:{item['ramp']}({item['ramp_dir_precise']})")
             if item['green'] > 0: parts.append(f"Green:{item['green']}")
             if item['redTube'] > 0: parts.append(f"RT:{item['redTube']}")
             if item['blueTube'] > 0: parts.append(f"BT:{item['blueTube']}")
             if item['robot'] > 0: parts.append(f"ROBOT")
-            print(f"   [{item['index']:2d}]  " + " | ".join(parts))
+            print(f"   [{item['index']:2d}]   " + " | ".join(parts))
         visualize_map_grid(map_data, sections)
         visualize_map_schematic(clean_map_data)
 
     return clean_map_data
-
 
 def main():
     ap = argparse.ArgumentParser(description="Analysis of RRO field sections (Map building)")
@@ -627,7 +629,6 @@ def main():
 
     print(f"   Loaded {len(sections)} sections.")
     run(sections, args.out_dir, debug=args.debug)
-
 
 if __name__ == "__main__":
     main()
