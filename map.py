@@ -13,10 +13,21 @@ RED_LOW2 = np.array([160, 70, 50])
 RED_HIGH2 = np.array([180, 255, 255])
 BLUE_LOW = np.array([100, 70, 50])
 BLUE_HIGH = np.array([130, 255, 255])
-GREEN_LOW = np.array([35, 50, 50])
+GREEN_LOW = np.array([35, 70, 70])
 GREEN_HIGH = np.array([85, 255, 255])
 ORANGE_LOW = np.array([5, 100, 100])
 ORANGE_HIGH = np.array([25, 255, 255])
+
+YELLOW_LOW = np.array([20, 100, 100])
+YELLOW_HIGH = np.array([35, 255, 255])
+CYAN_LOW = np.array([80, 70, 50])
+CYAN_HIGH = np.array([100, 255, 255])
+PURPLE_LOW = np.array([130, 50, 50])
+PURPLE_HIGH = np.array([160, 255, 255])
+WHITE_LOW = np.array([0, 0, 200])
+WHITE_HIGH = np.array([180, 30, 255])
+BLACK_LOW = np.array([0, 0, 0])
+BLACK_HIGH = np.array([180, 255, 50])
 
 MIN_AREA = 50
 ASPECT_THRESH = 1.8
@@ -42,10 +53,10 @@ def get_masks(img: np.ndarray) -> Dict[str, np.ndarray]:
 
 def analyze_level(img: np.ndarray) -> int:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY)
+    _, thresh = cv2.threshold(gray, 90, 255, cv2.THRESH_BINARY)
     white = cv2.countNonZero(thresh)
     total = img.shape[0] * img.shape[1]
-    return 1 if (total - white) > white else 0
+    return 1 if (total - 2 * white) > 20 else 0
 
 def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray, row: int, col: int, img_shape: tuple) -> Dict:
     h, w = img_shape[:2]
@@ -95,25 +106,34 @@ def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray, row: int, col:
 
     ramp_type, ramp_angle, ramp_dir = 0, 0.0, 0
     c_red_ramp, c_blue_ramp = None, None
+    objData = 0
     if red_c and blue_c:
         cr, _, _ = red_c[0]
         cb, _, _ = blue_c[0]
         dx, dy = cr[0] - cb[0], cr[1] - cb[1]
-        angle_deg = math.degrees(math.atan2(dy, dx))
-        orient = angle_deg % 180
-        if orient > 90: orient -= 180
-        ramp_type = 2 if abs(orient) < 45 else 1
+        # print(row*8 + col, dx, dy)
+        if ((abs(dx) - 50 > 0 and abs(dy) -  50 > 0)):
+            #new fuiling station
+            if (row not in [0, 7] and col not in [0, 7]):
+                print(f"ITS a station {row * 8 + col}")
+                objData = 1
+        else:
+            angle_deg = math.degrees(math.atan2(dy, dx))
+            orient = angle_deg % 180
+            if orient > 90: orient -= 180
+            ramp_type = 2 if abs(orient) < 45 else 1
 
-        norm = angle_deg
-        if norm < 0: norm += 360
-        if norm >= 315 or norm < 45: ramp_dir = 'N'
-        elif 45 <= norm < 135: ramp_dir = 'E'
-        elif 135 <= norm < 225: ramp_dir = 'S'
-        else: ramp_dir = 'W'
+            norm = angle_deg
+            if norm < 0: norm += 360
+            if norm >= 315 or norm < 45: ramp_dir = 'N'
+            elif 45 <= norm < 135: ramp_dir = 'E'
+            elif 135 <= norm < 225: ramp_dir = 'S'
+            else: ramp_dir = 'W'
 
-        ramp_angle = angle_deg
-        c_red_ramp, c_blue_ramp = cr, cb
-
+            ramp_angle = angle_deg
+            c_red_ramp, c_blue_ramp = cr, cb
+            
+    
     rt_type, rt_center, rt_box = 0, None, None
     if red_r: rt_center, rt_type, rt_box, _ = red_r[0]
     bt_type, bt_center, bt_box = 0, None, None
@@ -124,6 +144,7 @@ def analyze_red_blue(mask_red: np.ndarray, mask_blue: np.ndarray, row: int, col:
         "c_red_ramp": c_red_ramp, "c_blue_ramp": c_blue_ramp,
         "red_tube_type": rt_type, "red_tube_center": rt_center, "red_tube_box": rt_box,
         "blue_tube_type": bt_type, "blue_tube_center": bt_center, "blue_tube_box": bt_box,
+        "object_data": objData,
     }
 
 def analyze_green(mask_green: np.ndarray, row: int, col: int, img_shape: tuple) -> Tuple[int, Optional[Tuple[int, int]], Optional[np.ndarray]]:
@@ -146,21 +167,58 @@ def analyze_green(mask_green: np.ndarray, row: int, col: int, img_shape: tuple) 
         return obj_type, (int(cx), int(cy)), box
     return 0, None, None
 
-def analyze_robot(mask_orange: np.ndarray, img_shape: tuple) -> Tuple[int, float]:
+def analyze_robot(mask_orange: np.ndarray, img: np.ndarray, img_shape: tuple, use_qr_flag: Optional[bool] = None) -> Tuple[int, float]:
     h, w = img_shape[:2]
-    contours, _ = cv2.findContours(mask_orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return 0, 0.0
-    largest = max(contours, key=cv2.contourArea)
-    area = float(cv2.contourArea(largest))
-    if area < (h * w) * ROBOT_MIN_RATIO: return 0, area
-    return 1, area
+    
+    if use_qr_flag is None:
+        contours, _ = cv2.findContours(mask_orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours: 
+            return 0, 0.0
+        largest = max(contours, key=cv2.contourArea)
+        area = float(cv2.contourArea(largest))
+        if area < (h * w) * ROBOT_MIN_RATIO: 
+            return 0, area
+        return 1, area
+    elif use_qr_flag is True:
+        try:
+            qr_decoder = cv2.QRCodeDetector()
+            data, bbox, _ = qr_decoder.detectAndDecode(img)
+            if data and data.strip() == "42" and bbox is not None:
+                pts = bbox.reshape(4, 2).astype(np.int32)
+                area = float(cv2.contourArea(pts))
+                return 1, area
+        except Exception:
+            pass
+        return 0, 0.0
+    else: 
+        try:
+            # Новый API (OpenCV >= 4.7.0)
+            # Используем DICT_4X4_100, так как ID 67 не помещается в DICT_4X4_50 (максимум ID = 49)
+            aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100)
+            parameters = cv2.aruco.DetectorParameters()
+            detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+            corners, ids, _ = detector.detectMarkers(img)
+        except AttributeError:
+            # Старый API (OpenCV < 4.7.0)
+            aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_100)
+            parameters = cv2.aruco.DetectorParameters_create()
+            corners, ids, _ = cv2.aruco.detectMarkers(img, aruco_dict, parameters=parameters)
+            
+        if ids is not None:
+            for i, marker_id in enumerate(ids.flatten()):
+                if marker_id == 67:
+                    pts = corners[i].reshape(4, 2).astype(np.int32)
+                    area = float(cv2.contourArea(pts))
+                    return 1, area
+                    
+        return 0, 0.0
 
-def analyze_section(img: np.ndarray, row: int, col: int) -> Dict:
+def analyze_section(img: np.ndarray, row: int, col: int, use_qr_flag: Optional[bool] = None) -> Dict:
     level = analyze_level(img)
     masks = get_masks(img)
     rb = analyze_red_blue(masks["red"], masks["blue"], row, col, img.shape)
     g_type, g_center, g_box = analyze_green(masks["green"], row, col, img.shape)
-    robot_det, robot_area = analyze_robot(masks["orange"], img.shape)
+    robot_det, robot_area = analyze_robot(masks["orange"], img, img.shape, use_qr_flag)
 
     if rb["ramp_type"] > 0: level = 0
     if robot_det and (rb["ramp_type"] > 0 or rb["red_tube_type"] > 0 or rb["blue_tube_type"] > 0 or g_type > 0):
@@ -173,6 +231,7 @@ def analyze_section(img: np.ndarray, row: int, col: int) -> Dict:
         "redTube": rb["red_tube_type"], "redTube_center": rb["red_tube_center"], "redTube_box": rb["red_tube_box"],
         "blueTube": rb["blue_tube_type"], "blueTube_center": rb["blue_tube_center"], "blueTube_box": rb["blue_tube_box"],
         "robot": robot_det, "robot_area": robot_area,
+        "obj": rb["object_data"], "obj_pos": 3 if rb["object_data"] != 0 else 0,
     }
 
 def fix_cut_objects(map_data: List[Dict], sec_w: int, sec_h: int):
@@ -221,6 +280,16 @@ def fix_robot_uniqueness(map_data: List[Dict]):
     if cleared > 0:
         print(f"Робот продублирован в {cleared + 1} секциях — "
               f"оставлен в ({best['row']},{best['col']}) (area={best.get('robot_area', 0):.0f})")
+
+def set_obj_cell(map_data: List[Dict], row: int, col: int, pos: int = 0) -> List[Dict]:
+    for item in map_data:
+        if item["row"] == row and item["col"] == col:
+            item["obj"] = 1
+            item["obj_pos"] = pos
+            print(f"  [OBJ] Клетка ({row},{col}) помечена как waypoint (pos={pos})")
+            return map_data
+    print(f"  [WARN] Клетка ({row},{col}) не найдена в map_data")
+    return map_data
 
 def draw_arrow(canvas, center, obj_type, color, length=25):
     if not center or obj_type == 0: return
@@ -350,7 +419,7 @@ def visualize_map_schematic(clean_data: List[Dict], cell: int = 100, max_dim: in
                 cv2.fillPoly(canvas, [pts], (0, 140, 255))
                 cv2.polylines(canvas, [pts], True, (0, 0, 0), 2)
                 cv2.putText(canvas, "RBT", (x1 + 5, y1 + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 200), 2)
-
+            # if d.get("object_data"):
     cv2.putText(canvas, "Field Map Schematic", (margin, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
     cv2.putText(canvas, "R=Ramp G=Green RT=RedTube BT=BlueTube RBT=Robot", (margin, ch - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
     hc, wc = canvas.shape[:2]
@@ -368,10 +437,10 @@ def _json_serializer(obj):
     if isinstance(obj, tuple): return list(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
-def run(sections: List[Tuple[int, int, int, np.ndarray]], out_dir: str, debug: bool = False) -> List[Dict]:
+def run(sections: List[Tuple[int, int, int, np.ndarray]], out_dir: str, debug: bool = False, use_qr_flag: Optional[bool] = None) -> List[Dict]:
     map_data = []
     for idx, r, c, img in sections:
-        a = analyze_section(img, r, c)
+        a = analyze_section(img, r, c, use_qr_flag)
         map_data.append({
             "index": idx, "row": r, "col": c, "level": a["level"], "ramp": a["ramp"],
             "ramp_angle": a["ramp_angle"], "ramp_dir_precise": a["ramp_dir_precise"],
@@ -379,6 +448,7 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]], out_dir: str, debug: b
             "green_box": a["green_box"], "redTube": a["redTube"], "redTube_center": a["redTube_center"],
             "redTube_box": a["redTube_box"], "blueTube": a["blueTube"], "blueTube_center": a["blueTube_center"],
             "blueTube_box": a["blueTube_box"], "robot": a["robot"], "robot_area": a["robot_area"],
+            "obj": a["obj"], "obj_pos": a["obj_pos"],
         })
 
     _, _, _, sample = sections[0]
@@ -397,6 +467,7 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]], out_dir: str, debug: b
             "level": item["level"], "ramp": item["ramp"], "ramp_angle": item["ramp_angle"],
             "ramp_dir_precise": item["ramp_dir_precise"], "green": item["green"],
             "redTube": item["redTube"], "blueTube": item["blueTube"], "robot": item["robot"],
+            "obj": item["obj"], "obj_pos": item["obj_pos"],
         })
     with open(os.path.join(out_dir, "map.json"), "w", encoding="utf-8") as f:
         json.dump(clean, f, indent=4, ensure_ascii=False)
@@ -409,6 +480,7 @@ def run(sections: List[Tuple[int, int, int, np.ndarray]], out_dir: str, debug: b
             if item['redTube'] > 0: parts.append(f"RT:{item['redTube']}")
             if item['blueTube'] > 0: parts.append(f"BT:{item['blueTube']}")
             if item['robot'] > 0: parts.append("ROBOT")
+            if item['obj'] > 0: parts.append(f"OBJ[pos={item['obj_pos']}]")
             print(f"   [{item['index']:2d}]    " + " | ".join(parts))
         visualize_map_grid(map_data, sections)
         visualize_map_schematic(clean)
@@ -420,6 +492,8 @@ def main():
     parser.add_argument("--input-dir", default="output/sections")
     parser.add_argument("-o", "--out-dir", default="output")
     parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("--robot-mode", choices=["orange", "qr", "aruco"], default="qr", 
+                        help="Robot detection mode: orange (default), qr (code 42), aruco (code 67)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.input_dir):
@@ -438,8 +512,14 @@ def main():
         print("No sections found.")
         sys.exit(1)
 
-    print(f"Loaded {len(sections)} sections.")
-    run(sections, args.out_dir, debug=args.debug)
+    use_qr_flag = None
+    if args.robot_mode == "qr":
+        use_qr_flag = True
+    elif args.robot_mode == "aruco":
+        use_qr_flag = False
+
+    print(f"Loaded {len(sections)} sections. Robot mode: {args.robot_mode}")
+    run(sections, args.out_dir, debug=args.debug, use_qr_flag=use_qr_flag)
 
 if __name__ == "__main__":
     main()

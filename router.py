@@ -9,16 +9,18 @@ from typing import List, Tuple, Dict, Optional
 HEADING_N, HEADING_E, HEADING_S, HEADING_W = 0, 1, 2, 3
 HEADING_NAMES = {0: "N", 1: "E", 2: "S", 3: "W"}
 HEADING_DELTA = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
-RAMP_COST = 1.5
+RAMP_COST = 20
 MOVE_COST = 1.0
 
+NO_USE_RAMP = False
 
 class FieldRouter:
-    def __init__(self, map_data: List[Dict], debug: bool = False):
+    def __init__(self, map_data: List[Dict], debug: bool = False, noRamps: bool = False):
         self.map_data = map_data
         self.grid = {(item["row"], item["col"]): item for item in map_data}
         self.nodes, self.edges, self.blocked, self.ramp_info = set(), {}, {}, {}
         self.debug = debug
+
         self._build_graph()
 
     def _is_blocked(self, r: int, c: int, level: int) -> Tuple[bool, str]:
@@ -31,6 +33,10 @@ class FieldRouter:
         return (level != data.get("level", 0)), "level_mismatch"
 
     def _is_valid_ramp(self, r: int, c: int, ramp_dir: str) -> bool:
+        
+        if NO_USE_RAMP:
+            return False
+        
         if ramp_dir not in ("N", "S", "E", "W"): return False
         hd = {"N": HEADING_N, "E": HEADING_E, "S": HEADING_S, "W": HEADING_W}
         down_h = hd[ramp_dir]
@@ -242,13 +248,33 @@ class FieldRouter:
 
     def save_graph(self, out_dir: str):
         os.makedirs(out_dir, exist_ok=True)
+
+        def edge_key(n):
+            return f"{n[0]},{n[1]},{n[2]}"
+
+        def ramp_key(n):
+            return f"{n[0]},{n[1]}"
+
+        edges = {}
+        for n, eds in self.edges.items():
+            key = edge_key(n)
+            edges[key] = [{"to": list(nb), "cost": c, "action": list(a)} for nb, c, a in eds]
+
+        ramp_info = {}
+        for k, v in self.ramp_info.items():
+            ramp_info[ramp_key(k)] = {"down": HEADING_NAMES[v[0]], "up": HEADING_NAMES[v[1]]}
+
         data = {
             "nodes": [list(n) for n in sorted(self.nodes)],
-            "edges": {f"{n[0]},{n[1]},{n[2]}": [{"to": list(nb), "cost": c, "action": list(a)} for nb, c, a in eds] for n, eds in self.edges.items()},
-            "blocked": {f"{k[0]},{k[1]},{k[2]}": v for k, v in self.blocked.items()},
-            "ramp_info": {f"{k[0]},{k[1]}": {"down": HEADING_NAMES[v[0]], "up": HEADING_NAMES[v[1]]} for k, v in self.ramp_info.items()},
-            "stats": {"total_nodes": len(self.nodes), "total_edges": sum(len(v) for v in self.edges.values()),
-                      "l0": sum(1 for n in self.nodes if n[2] == 0), "l1": sum(1 for n in self.nodes if n[2] == 1)}
+            "edges": edges,
+            "blocked": {edge_key(k): v for k, v in self.blocked.items()},
+            "ramp_info": ramp_info,
+            "stats": {
+                "total_nodes": len(self.nodes),
+                "total_edges": sum(len(v) for v in self.edges.values()),
+                "l0": sum(1 for n in self.nodes if n[2] == 0),
+                "l1": sum(1 for n in self.nodes if n[2] == 1),
+            },
         }
         with open(os.path.join(out_dir, "graph.json"), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -260,6 +286,8 @@ class FieldRouter:
         print(f"Граф: L0={l0}, L1={l1}, невалидных пандусов={inv}")
 
 
+MAX_LABEL = 75
+
 def print_route(cmds, cost, raw, start_h=HEADING_N):
     for i, c in enumerate(cmds, 1): print(f"   {i}. {c}")
 
@@ -267,11 +295,21 @@ def commands_to_short(cmds: List[str]) -> str:
     return " -> ".join(cmds) if cmds else ""
 
 
+SZ = 600
+CELL = 60
+OFF = (SZ - 8 * CELL) // 2
+TOP = 40
+
+def _cell_center(r, c):
+    return OFF + c * CELL + CELL // 2, TOP + r * CELL + CELL // 2
+
+def _cell_rect(r, c):
+    return OFF + c * CELL, TOP + r * CELL
+
 class InteractiveRouter:
-    def __init__(self, map_data: List[Dict], cell_size=100, prefer_straight=False):
+    def __init__(self, map_data: List[Dict], prefer_straight=False):
         self.router = FieldRouter(map_data)
         self.prefer_straight = prefer_straight
-        self.cs, self.m = cell_size, 80
         self.rows, self.cols = 8, 8
         self.start = self.goal = self.last = None
         self.h = HEADING_N
@@ -280,46 +318,45 @@ class InteractiveRouter:
         self._make_canvas()
         cv2.namedWindow("Router", cv2.WINDOW_NORMAL)
         cv2.setMouseCallback("Router", self._on_click)
+        cv2.resizeWindow("Router", SZ, SZ)
 
     def _make_canvas(self):
-        cs, m = self.cs, self.m
-        h = self.rows * cs + m * 2 + 120
-        w = self.cols * cs + m * 2
-        self.base = np.ones((h, w, 3), dtype=np.uint8) * 240
-        for r in range(self.rows):
-            for c in range(self.cols):
-                x1, y1 = m + c * cs, m + r * cs
+        self.base = np.ones((SZ, SZ, 3), dtype=np.uint8) * 240
+        for r in range(8):
+            for c in range(8):
+                x1, y1 = _cell_rect(r, c)
                 d = next((x for x in self.router.map_data if x["row"] == r and x["col"] == c), {})
                 lvl = d.get("level", 0)
                 has_ramp = d.get("ramp", 0) > 0
-                bg = (60, 60, 60) if (lvl == 1 or has_ramp) else (200, 200, 200)
-                cv2.rectangle(self.base, (x1, y1), (x1 + cs, y1 + cs), bg, -1)
-                cv2.rectangle(self.base, (x1, y1), (x1 + cs, y1 + cs), (0, 0, 0), 2)
+                bg = (60, 60, 60) if (lvl == 1 or has_ramp) else (220, 220, 220)
+                cv2.rectangle(self.base, (x1, y1), (x1 + CELL, y1 + CELL), bg, -1)
+                cv2.rectangle(self.base, (x1, y1), (x1 + CELL, y1 + CELL), (0, 0, 0), 1)
                 tc = (255, 255, 255) if (lvl == 1 or has_ramp) else (0, 0, 0)
-                cv2.putText(self.base, str(r * 8 + c), (x1 + 5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, tc, 2)
+                cv2.putText(self.base, str(r * 8 + c), (x1 + 3, y1 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.35, tc, 1)
                 if has_ramp:
-                    cx, cy = x1 + cs // 2, y1 + cs // 2
+                    cx, cy = _cell_center(r, c)
                     rd = d.get("ramp_dir_precise", 0)
                     col = (0, 165, 255)
-                    if rd == "S": cv2.arrowedLine(self.base, (cx, cy - 30), (cx, cy + 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    elif rd == "N": cv2.arrowedLine(self.base, (cx, cy + 30), (cx, cy - 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    elif rd == "E": cv2.arrowedLine(self.base, (cx - 30, cy), (cx + 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    elif rd == "W": cv2.arrowedLine(self.base, (cx + 30, cy), (cx - 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    al = CELL // 2 - 4
+                    if rd == "S": cv2.arrowedLine(self.base, (cx, cy - al), (cx, cy + al), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif rd == "N": cv2.arrowedLine(self.base, (cx, cy + al), (cx, cy - al), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif rd == "E": cv2.arrowedLine(self.base, (cx - al, cy), (cx + al, cy), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif rd == "W": cv2.arrowedLine(self.base, (cx + al, cy), (cx - al, cy), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
 
     def _xy_to_cell(self, x, y):
-        c = (x - self.m) // self.cs
-        r = (y - self.m) // self.cs
+        c = (x - OFF) // CELL
+        r = (y - TOP) // CELL
         return (r, c) if 0 <= r < 8 and 0 <= c < 8 else None
 
-    def _draw_edges(self, c):
+    def _draw_edges(self, canvas):
         for n, eds in self.router.edges.items():
             r, cc, _ = n
-            p1 = (self.m + cc * self.cs + self.cs // 2, self.m + r * self.cs + self.cs // 2)
+            p1 = _cell_center(r, cc)
             for nb, _, act in eds:
                 nr, nc, _ = nb
-                p2 = (self.m + nc * self.cs + self.cs // 2, self.m + nr * self.cs + self.cs // 2)
+                p2 = _cell_center(nr, nc)
                 col = (180, 50, 180) if act[0].startswith("ramp") else (80, 120, 200)
-                cv2.line(c, p1, p2, col, 2)
+                cv2.line(canvas, p1, p2, col, 1)
 
     def _on_click(self, e, x, y, f, p):
         if e == cv2.EVENT_LBUTTONDOWN:
@@ -351,28 +388,32 @@ class InteractiveRouter:
         c = self.base.copy()
         self._draw_edges(c)
         if self.last:
-            pts = [(self.m + cc * self.cs + self.cs // 2, self.m + r * self.cs + self.cs // 2) for r, cc, _ in self.last[2]]
-            for i in range(len(pts) - 1): cv2.line(c, pts[i], pts[i + 1], (0, 120, 255), 3)
-            cv2.circle(c, pts[0], 8, (0, 255, 0), -1); cv2.circle(c, pts[-1], 8, (0, 0, 255), -1)
+            pts = [_cell_center(r, cc) for r, cc, _ in self.last[2]]
+            for i in range(len(pts) - 1):
+                cv2.line(c, pts[i], pts[i + 1], (0, 120, 255), 2)
+            if pts:
+                cv2.circle(c, pts[0], 6, (0, 255, 0), -1)
+                cv2.circle(c, pts[-1], 6, (0, 0, 255), -1)
         if self.start:
             r, cc = self.start
-            x, y = self.m + cc * self.cs, self.m + r * self.cs
-            cv2.rectangle(c, (x + 2, y + 2), (x + self.cs - 2, y + self.cs - 2), (0, 255, 0), 3)
+            x, y = _cell_rect(r, cc)
+            cv2.rectangle(c, (x + 1, y + 1), (x + CELL - 2, y + CELL - 2), (0, 255, 0), 2)
             d = HEADING_DELTA[self.h]
-            cx, cy = x + self.cs // 2, y + self.cs // 2
-            cv2.arrowedLine(c, (cx, cy), (cx + d[1] * 30, cy + d[0] * 30), (0, 255, 0), 4, line_type=cv2.LINE_AA, tipLength=0.3)
-        bh = 80; ch, cw = c.shape[:2]
-        cv2.rectangle(c, (0, ch - bh), (cw, ch), (40, 40, 40), -1)
-        cv2.putText(c, self.msg, (self.m, ch - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cx, cy = _cell_center(r, cc)
+            cv2.arrowedLine(c, (cx, cy), (cx + d[1] * 20, cy + d[0] * 20), (0, 255, 0), 2, line_type=cv2.LINE_AA, tipLength=0.3)
+        cv2.rectangle(c, (0, SZ - 32), (SZ, SZ), (40, 40, 40), -1)
+        cv2.putText(c, self.msg, (10, SZ - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         if self.short:
             lbl = f"Route: {self.short}"
-            if len(lbl) > 75: lbl = lbl[:72] + "..."
-            cv2.putText(c, lbl, (self.m, ch - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 255), 1)
+            if len(lbl) > 60:
+                lbl = lbl[:57] + "..."
+            cv2.putText(c, lbl, (OFF, TOP - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 150, 200), 1)
         cv2.imshow("Router", c)
 
     def run(self):
         mode = "Интерактивный режим"
-        if self.prefer_straight: mode += " [SPEED: меньше поворотов]"
+        if self.prefer_straight:
+            mode += " [SPEED]"
         print(f"{mode}. ЛКМ - старт/цель, ПКМ - сброс, WASD - heading, Q/Esc - выход")
         self._redraw()
         while True:
@@ -390,13 +431,12 @@ class InteractiveRouter:
 
 
 class CarryInteractiveRouter:
-    def __init__(self, map_data: List[Dict], cell_size=100, animate=False, robot_start=None, prefer_straight=False):
+    def __init__(self, map_data: List[Dict], animate=False, robot_start=None, prefer_straight=False, obj_cmd="K"):
         self.router = FieldRouter(map_data)
         from carry_planner import CarryPlanner, commands_to_short_carry
-        self.planner = CarryPlanner(self.router)
+        self.planner = CarryPlanner(self.router, obj_cmd=obj_cmd)
         self.cmd_short = commands_to_short_carry
         self.prefer_straight = prefer_straight
-        self.cs, self.m = cell_size, 80
         self.rows, self.cols = 8, 8
         self.start = None
         self.h = HEADING_N
@@ -409,55 +449,56 @@ class CarryInteractiveRouter:
         else:
             self.msg = "ЛКМ - старт робота | WASD - heading | Enter - отправить | Q - выход"
         self.short = " "
+        self.tubesPoints = []
+        self.postsPoints = []
         self._make_canvas()
         cv2.namedWindow("Carry Planner", cv2.WINDOW_NORMAL)
         cv2.setMouseCallback("Carry Planner", self._on_click)
+        cv2.resizeWindow("Carry Planner", SZ, SZ)
 
     def _make_canvas(self):
-        cs, m = self.cs, self.m
-        h = self.rows * cs + m * 2 + 120
-        w = self.cols * cs + m * 2
-        self.base = np.ones((h, w, 3), dtype=np.uint8) * 240
-        for r in range(self.rows):
-            for c in range(self.cols):
-                x1, y1 = m + c * cs, m + r * cs
+        self.base = np.ones((SZ, SZ, 3), dtype=np.uint8) * 240
+        for r in range(8):
+            for c in range(8):
+                x1, y1 = _cell_rect(r, c)
                 d = next((x for x in self.router.map_data if x["row"] == r and x["col"] == c), {})
                 lvl = d.get("level", 0)
                 has_ramp = d.get("ramp", 0) > 0
-                bg = (60, 60, 60) if (lvl == 1 or has_ramp) else (200, 200, 200)
-                cv2.rectangle(self.base, (x1, y1), (x1 + cs, y1 + cs), bg, -1)
-                cv2.rectangle(self.base, (x1, y1), (x1 + cs, y1 + cs), (0, 0, 0), 2)
+                bg = (60, 60, 60) if (lvl == 1 or has_ramp) else (220, 220, 220)
+                cv2.rectangle(self.base, (x1, y1), (x1 + CELL, y1 + CELL), bg, -1)
+                cv2.rectangle(self.base, (x1, y1), (x1 + CELL, y1 + CELL), (0, 0, 0), 1)
                 tc = (255, 255, 255) if (lvl == 1 or has_ramp) else (0, 0, 0)
-                cv2.putText(self.base, str(r * 8 + c), (x1 + 5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, tc, 2)
-                cx, cy = x1 + cs // 2, y1 + cs // 2
+                cv2.putText(self.base, str(r * 8 + c), (x1 + 3, y1 + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.35, tc, 1)
+                cx, cy = _cell_center(r, c)
                 if has_ramp:
                     col = (0, 165, 255)
                     rd = d.get("ramp_dir_precise", 0)
-                    if rd == "S": cv2.arrowedLine(self.base, (cx, cy - 30), (cx, cy + 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    elif rd == "N": cv2.arrowedLine(self.base, (cx, cy + 30), (cx, cy - 30), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    elif rd == "E": cv2.arrowedLine(self.base, (cx - 30, cy), (cx + 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
-                    elif rd == "W": cv2.arrowedLine(self.base, (cx + 30, cy), (cx - 30, cy), col, 4, line_type=cv2.LINE_AA, tipLength=0.3)
+                    al = CELL // 2 - 4
+                    if rd == "S": cv2.arrowedLine(self.base, (cx, cy - al), (cx, cy + al), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif rd == "N": cv2.arrowedLine(self.base, (cx, cy + al), (cx, cy - al), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif rd == "E": cv2.arrowedLine(self.base, (cx - al, cy), (cx + al, cy), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
+                    elif rd == "W": cv2.arrowedLine(self.base, (cx + al, cy), (cx - al, cy), col, 2, line_type=cv2.LINE_AA, tipLength=0.3)
                 rt = d.get("redTube", 0)
                 if rt > 0:
-                    if rt == 1: cv2.rectangle(self.base, (cx - 6, cy - 22), (cx + 6, cy + 22), (0, 0, 255), 3)
-                    else: cv2.rectangle(self.base, (cx - 22, cy - 6), (cx + 22, cy + 6), (0, 0, 255), 3)
+                    if rt == 1: cv2.rectangle(self.base, (cx - 4, cy - 14), (cx + 4, cy + 14), (0, 0, 255), 2)
+                    else: cv2.rectangle(self.base, (cx - 14, cy - 4), (cx + 14, cy + 4), (0, 0, 255), 2)
                 bt = d.get("blueTube", 0)
                 if bt > 0:
-                    ox = 14 if rt > 0 else 0; oy = 14 if rt > 0 else 0
-                    if bt == 1: cv2.rectangle(self.base, (cx - 6 + ox, cy - 22 + oy), (cx + 6 + ox, cy + 22 + oy), (255, 0, 0), 3)
-                    else: cv2.rectangle(self.base, (cx - 22 + ox, cy - 6 + oy), (cx + 22 + ox, cy + 6 + oy), (255, 0, 0), 3)
+                    ox = 10 if rt > 0 else 0; oy = 10 if rt > 0 else 0
+                    if bt == 1: cv2.rectangle(self.base, (cx - 4 + ox, cy - 14 + oy), (cx + 4 + ox, cy + 14 + oy), (255, 0, 0), 2)
+                    else: cv2.rectangle(self.base, (cx - 14 + ox, cy - 4 + oy), (cx + 14 + ox, cy + 4 + oy), (255, 0, 0), 2)
                 g = d.get("green", 0)
-                if g > 0: cv2.circle(self.base, (cx + 25, cy + 25), 10, (0, 200, 0), 3)
+                if g > 0: cv2.circle(self.base, (cx + 16, cy + 16), 7, (0, 200, 0), 2)
                 robot = d.get("robot", 0)
                 if robot > 0:
-                    L, W_tri = 22, 14
-                    pts = np.array([[cx, cy - L], [cx - W_tri, cy + L // 2], [cx + W_tri, cy + L // 2]], dtype=np.int32)
+                    L, Wt = 16, 10
+                    pts = np.array([[cx, cy - L], [cx - Wt, cy + L // 2], [cx + Wt, cy + L // 2]], dtype=np.int32)
                     cv2.fillPoly(self.base, [pts], (0, 140, 255))
-                    cv2.polylines(self.base, [pts], True, (0, 0, 0), 2)
+                    cv2.polylines(self.base, [pts], True, (0, 0, 0), 1)
 
     def _xy_to_cell(self, x, y):
-        c = (x - self.m) // self.cs
-        r = (y - self.m) // self.cs
+        c = (x - OFF) // CELL
+        r = (y - TOP) // CELL
         return (r, c) if 0 <= r < 8 and 0 <= c < 8 else None
 
     def _plan_from(self, cell):
@@ -465,7 +506,7 @@ class CarryInteractiveRouter:
         self.msg = f"Планирую от {cell} (heading={HEADING_NAMES[self.h]})... "
         self.short = "PLANNING... "
         self._redraw(); cv2.waitKey(10)
-        self.plan = self.planner.plan(cell, self.h, verbose=True, animate=False, robot_start=self.robot_start, prefer_straight=self.prefer_straight)
+        self.plan = self.planner.plan(cell, self.h, verbose=False, animate=False, robot_start=self.robot_start, prefer_straight=self.prefer_straight)
         if self.plan:
             self.planner.print_plan(self.plan)
             self.short = self.cmd_short(self.plan["commands"])
@@ -497,32 +538,32 @@ class CarryInteractiveRouter:
     def _redraw(self):
         c = self.base.copy()
         if self.plan and self.plan.get("raw_path"):
-            cs, m = self.cs, self.m
-            pts = [(m + cc * cs + cs // 2, m + r * cs + cs // 2) for (r, cc) in self.plan["raw_path"]]
-            for i in range(len(pts) - 1): cv2.line(c, pts[i], pts[i + 1], (0, 120, 255), 3)
+            pts = [_cell_center(r, cc) for (r, cc) in self.plan["raw_path"]]
+            for i in range(len(pts) - 1):
+                cv2.line(c, pts[i], pts[i + 1], (0, 120, 255), 2)
             if pts:
-                cv2.circle(c, pts[0], 10, (0, 255, 0), -1)
-                cv2.circle(c, pts[-1], 10, (0, 0, 255), -1)
+                cv2.circle(c, pts[0], 6, (0, 255, 0), -1)
+                cv2.circle(c, pts[-1], 6, (0, 0, 255), -1)
             for seg in self.plan["segments"]:
                 ta = seg["tube_approach"]; pa = seg["pod_approach"]
-                tx = m + ta[1] * cs + cs // 2; ty = m + ta[0] * cs + cs // 2
-                px = m + pa[1] * cs + cs // 2; py = m + pa[0] * cs + cs // 2
-                cv2.circle(c, (tx, ty), 6, (0, 165, 255), -1)
-                cv2.circle(c, (px, py), 6, (0, 255, 0), -1)
+                tx, ty = _cell_center(ta[0], ta[1])
+                px, py = _cell_center(pa[0], pa[1])
+                cv2.circle(c, (tx, ty), 5, (0, 165, 255), -1)
+                cv2.circle(c, (px, py), 5, (0, 255, 0), -1)
         if self.start:
             r, cc = self.start
-            x, y = self.m + cc * self.cs, self.m + r * self.cs
-            cv2.rectangle(c, (x + 2, y + 2), (x + self.cs - 2, y + self.cs - 2), (0, 255, 0), 3)
+            x, y = _cell_rect(r, cc)
+            cv2.rectangle(c, (x + 1, y + 1), (x + CELL - 2, y + CELL - 2), (0, 255, 0), 2)
             d = HEADING_DELTA[self.h]
-            cx, cy = x + self.cs // 2, y + self.cs // 2
-            cv2.arrowedLine(c, (cx, cy), (cx + d[1] * 30, cy + d[0] * 30), (0, 255, 0), 4, line_type=cv2.LINE_AA, tipLength=0.3)
-        bh = 80; ch, cw = c.shape[:2]
-        cv2.rectangle(c, (0, ch - bh), (cw, ch), (40, 40, 40), -1)
-        cv2.putText(c, self.msg, (self.m, ch - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cx, cy = _cell_center(r, cc)
+            cv2.arrowedLine(c, (cx, cy), (cx + d[1] * 20, cy + d[0] * 20), (0, 255, 0), 2, line_type=cv2.LINE_AA, tipLength=0.3)
+        cv2.rectangle(c, (0, SZ - 32), (SZ, SZ), (40, 40, 40), -1)
+        cv2.putText(c, self.msg, (10, SZ - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         if self.short:
             lbl = f"Plan: {self.short}"
-            if len(lbl) > 75: lbl = lbl[:72] + "..."
-            cv2.putText(c, lbl, (self.m, ch - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 230, 255), 1)
+            if len(lbl) > 60:
+                lbl = lbl[:57] + "..."
+            cv2.putText(c, lbl, (OFF, TOP - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 150, 200), 1)
         cv2.imshow("Carry Planner", c)
 
     def run(self):
@@ -533,7 +574,7 @@ class CarryInteractiveRouter:
         if self.robot_start:
             cv2.waitKey(200)
             self._plan_from(self.robot_start)
-        send = False
+        send = True
         while True:
             k = cv2.waitKey(50) & 0xFF
             if k in (13, 10): send = True; break
@@ -554,14 +595,15 @@ class CarryInteractiveRouter:
                 elif self.start and not self.robot_start: self._plan_from(self.start)
                 else: self._redraw()
         cv2.destroyAllWindows()
+
         return self.plan if send else None
 
 
-def run_interactive(map_data: List[Dict], cell_size=100, prefer_straight=False):
-    InteractiveRouter(map_data, cell_size, prefer_straight=prefer_straight).run()
+def run_interactive(map_data: List[Dict], prefer_straight=False):
+    InteractiveRouter(map_data, prefer_straight=prefer_straight).run()
 
-def run_carry_interactive(map_data: List[Dict], cell_size=100, animate=False, robot_start=None, prefer_straight=False):
-    return CarryInteractiveRouter(map_data, cell_size, animate=animate, robot_start=robot_start, prefer_straight=prefer_straight).run()
+def run_carry_interactive(map_data: List[Dict], animate=False, robot_start=None, prefer_straight=False, obj_cmd="K"):
+    return CarryInteractiveRouter(map_data, animate=animate, robot_start=robot_start, prefer_straight=prefer_straight, obj_cmd=obj_cmd).run()
 
 def main():
     ap = argparse.ArgumentParser()

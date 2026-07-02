@@ -24,12 +24,6 @@ class BluetoothSender:
         self.connected = False
         self.port = None
 
-    def list_ports(self) -> List[str]:
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            print(f"Port: {p.device} - {p.description}")
-        return [p.device for p in ports]
-
     def connect(self, port: str) -> bool:
         try:
             print(f"Connecting to {port}...", end=" ")
@@ -45,12 +39,6 @@ class BluetoothSender:
         except Exception as e:
             print(f"Error: {e}")
             return False
-
-    def connect_any(self) -> bool:
-        for port in self.list_ports():
-            if self.connect(port):
-                return True
-        return False
 
     def connect_to(self, port: Optional[str] = None) -> bool:
         return self.connect(port) if port else self.connect_any()
@@ -72,7 +60,7 @@ class BluetoothSender:
                 result.append(c)
             elif c == "AROUND":
                 result.append("A")
-            elif c in ("R", "L", "U", "D", "T", "P"):
+            elif c in ("R", "L", "U", "D", "T", "P","S"):
                 result.append(c)
         return "".join(result)
 
@@ -125,7 +113,14 @@ def run(commands: Optional[List[str]] = None, com_port: Optional[str] = None,
     print("Done")
     return True
 
-
 if __name__ == "__main__":
-    test = ["F3", "R", "F2", "T", "L", "P"]
-    print(f"Test: {BluetoothSender.to_compact(test, 0)}")
+    test = ["F1", "S", "around"]
+    sender = BluetoothSender()
+    if not sender.connect_to("COM5"):
+        print("Connection failed. Falling back to simulation.")
+    sender.send_compact(test)
+    print(test)
+    sender.read_response(timeout=60)
+
+    sender.disconnect()
+    print("Done")

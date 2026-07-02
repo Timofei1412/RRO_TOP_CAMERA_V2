@@ -22,4 +22,6 @@
 # Примеры запуска кода 
 ```python .\pipeline.py Test_images\NEW1Covered.png --speed --carry ```
 
-```python .\pipeline.py rtmp://192.168.22.68/live/robocamera --carry --port COM8 --speed ```
+```python .\pipeline.py rtmp://192.168.22.68/live/robocamera --carry --port COM8 --speed```
+
+```python .\pipeline.py Test_images\OREN6.png --carry --robot-mode aruco --port COM5```

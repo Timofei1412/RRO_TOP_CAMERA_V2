@@ -31,7 +31,7 @@ def save_sections(sections: List[Tuple[int, int, int, np.ndarray]], out_dir: str
         fname = f"{prefix}_{str(idx).zfill(digits)}.{ext}"
         cv2.imwrite(os.path.join(out_dir, fname), img)
 
-def show_grid(image: np.ndarray, grid: Tuple[int, int] = (8, 8), max_dim: int = 1000) -> None:
+def show_grid(image: np.ndarray, grid: Tuple[int, int] = (8, 8), max_dim: int = 500) -> None:
     h, w = image.shape[:2]
     rows, cols = grid
     cell_w = w / cols

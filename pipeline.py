@@ -10,14 +10,9 @@ import cv2
 import argparse
 
 
-def run_pipeline(source: str,
-                 debug: bool = False,
-                 interactive: bool = False,
-                 carry: bool = False,
-                 com_port: str = None,
-                 animate: bool = False,
-                 speed: bool = False,
-                 hands: bool = False) -> bool:
+def run_pipeline(source: str, debug: bool = False, interactive: bool = False, carry: bool = False,
+                 com_port: str = None, animate: bool = False, speed: bool = False, hands: bool = False,
+                 noRamps: bool = False, useQR = None, obj_cmd: str = "K") -> bool:
     out_dir = "output"
     field_size: Tuple[int, int] = (1000, 1000)
     grid: Tuple[int, int] = (8, 8)
@@ -34,6 +29,8 @@ def run_pipeline(source: str,
         print("АНИМАЦИЯ: Включена")
     if speed:
         print("SPEED: при равной длине — меньше поворотов")
+    if obj_cmd != "K":
+        print(f"OBJ: кастомная команда waypoint — {obj_cmd}")
     if hands:
         print("HANDS: ручной выбор углов разрешён при сбое авто-поиска")
     else:
@@ -54,14 +51,14 @@ def run_pipeline(source: str,
     # Шаг 2: Нарезка на секции
     sections = split.run(
         normalized_field=normalized_field,
-        out_dir=out_dir,
+        out_dir =out_dir,
         grid=grid,
         prefix=section_prefix,
         debug=debug
     )
 
     # Шаг 3: Анализ секций
-    map_data = map.run(sections=sections, out_dir=out_dir, debug=debug)
+    map_data = map.run(sections=sections, out_dir=out_dir, debug=debug, use_qr_flag={"qr": True, "aruco": False}.get(useQR))
 
     robot_start: Optional[Tuple[int, int]] = None
     start_level: int = 0
@@ -76,7 +73,7 @@ def run_pipeline(source: str,
                   f"потребуется ручной выбор стартовой клетки.")
 
     # Шаг 4: Построение графа
-    field_router = router.FieldRouter(map_data, debug=True)
+    field_router = router.FieldRouter(map_data, debug=True, noRamps = noRamps)
     field_router.print_graph_stats()
     field_router.save_graph(out_dir)
 
@@ -86,16 +83,12 @@ def run_pipeline(source: str,
     if carry:
         plan = router.run_carry_interactive(
             map_data, animate=animate, robot_start=robot_start,
-            prefer_straight=speed,
+            prefer_straight=speed, obj_cmd=obj_cmd,
         )
         if plan:
             all_commands = plan.get("commands", [])
-        success = True
     elif interactive:
         router.run_interactive(map_data, prefer_straight=speed)
-        success = True
-    else:
-        success = True
 
     # Шаг 5: ОТПРАВКА ДАННЫХ
     if all_commands:
@@ -130,12 +123,18 @@ def main():
                     help="Разрешить ручной выбор углов при сбое авто-поиска")
     ap.add_argument("-d", "--debug", action="store_true",
                     help="Режим отладки с визуализацией")
+    ap.add_argument("-r", "--noRamps", action="store_true",
+                    help="Заблокировать использование рамп")
+    ap.add_argument("--robot-mode", choices=["orange", "qr", "aruco"], default="qr", 
+                        help="Robot detection mode: orange (default), qr (code 42), aruco (code 67)")
+    ap.add_argument("--obj-cmd", type=str, default="K",
+                        help="Команда для waypoint-точки (по умолч. K)")
     args = ap.parse_args()
 
     if args.carry and args.interactive:
         print("Флаги --carry и --interactive взаимоисключающие. Использую --carry.")
         args.interactive = False
-
+    router.NO_USE_RAMP = args.noRamps
     success = run_pipeline(
         source=args.source,
         debug=args.debug,
@@ -145,6 +144,9 @@ def main():
         animate=args.animate,
         speed=args.speed,
         hands=args.hands,
+        noRamps= args.noRamps,
+        useQR= args.robot_mode,
+        obj_cmd=args.obj_cmd,
     )
 
     sys.exit(0 if success else 1)
